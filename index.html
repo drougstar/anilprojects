@@ -4,11 +4,50 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <link rel="stylesheet" href="style.css" />
     <title>Anil Projects</title>
   </head>
+  </head>
   <body>
-    <h2><a href="https://week.anilprojects.com/">Week Number</a></h2>
-    <h2><a href="https://guess.anilprojects.com">Guess Number</a></h2>
+    <button class="show-modal" onclick="location.href='https://anilprojects.com/'" type="button">
+      Home
+    </button>
+    <button class="show-modal-week">
+      Week Number
+    </button>
+    <button class="show-modal-guess">
+      Guess Number
+    </button>
+    <div class="modal week hidden">
+      <button class="close-button-week close-modal">&times;</button>
+      <h1>Week Number</h1>
+      <img src=".resources/Banner_week.png" alt="Banner_week">
+      <p>
+        This is a simple calculation project about displaying week number according to users input with dates
+      </p>
+      <button class="button-project-modal" onclick="location.href='https://week.anilprojects.com/'" type="button">
+        Go
+      </button>
+    </div>
+    <div class="modal guess hidden">
+      <button class="close-button-guess close-modal">&times;</button>
+      <h1>Guess Number</h1>
+      <img src=".resources/Banner_guess.png" alt="Banner_week">
+      <p>
+        This is a simple and fun project about guessing a secret random number from 1 to 20 and recording your score relatively 
+      </p>
+      <button class="button-project-modal" onclick="location.href='https://guess.anilprojects.com/'" type="button">
+        Go
+      </button>
+    </div>
+    <!-- <div class="modal hidden">
+      <button class="close-button">&times;</button>
+      <h1>I'm a modal window 😍</h1>
+      <p>
+        Lorem
+      </p>
+    </div> -->
+    <div class="overlay hidden"></div>
 
     <script src="script.js"></script>
   </body>
