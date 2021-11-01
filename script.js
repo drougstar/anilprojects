@@ -2,6 +2,7 @@
 // Storing variables which will be in use in this script
 const modalWeek = document.querySelector(".week"),
   modalGuess = document.querySelector(".guess"),
+  modalDice = document.querySelector(".dice"),
   overlay = document.querySelector(".overlay"),
   closeButtonWeek = document.querySelector(".close-button-week"),
   closeButtonGuess = document.querySelector(".close-button-guess"),
@@ -67,8 +68,8 @@ const modalWeek = document.querySelector(".week"),
 
 eLClick(openModalWeek, "", modalButtonWeek);
 eLClick(openModalGuess, "", modalButtonGuess);
-eLClick(openModalGuess, "", modalButtonDice);
+eLClick(openModalDice, "", modalButtonDice);
 
 eLClick(closeModalWeek, pressedKey, closeButtonWeek, overlay);
 eLClick(closeModalGuess, pressedKey, closeButtonGuess, overlay);
-eLClick(closeModalGuess, pressedKey, closeButtonDice, overlay);
+eLClick(closeModalDice, pressedKey, closeButtonDice, overlay);

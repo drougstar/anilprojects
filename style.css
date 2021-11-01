@@ -22,6 +22,7 @@ body {
 }
 
 .show-modal,
+.show-modal-dice,
 .show-modal-week,
 .show-modal-guess {
   font-size: 2rem;
