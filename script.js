@@ -19,19 +19,11 @@ const modalWeek = document.querySelector(".week"),
     for (let i = 2; i < arguments.length; i++) {
       arguments[i].addEventListener("click", functions);
     }
-const modals = document.querySelectorAll('.modal');
-const showButtons = document.querySelectorAll('.show-modal-week, .show-modal-guess, .show-modal-dice, .show-modal-color');
-const closeButtons = document.querySelectorAll('.close-modal');
-const overlay = document.querySelector('.overlay');
 
     document.addEventListener("keydown", function (e) {
       if (e.key === keywords && !modalWeek.classList.contains("hidden")) {
         closeModalWeek();
       }
-showButtons.forEach((button, index) => {
-    button.addEventListener('click', () => {
-        modals[index].classList.remove('hidden');
-        overlay.classList.remove('hidden');
     });
     document.addEventListener("keydown", function (e) {
       if (e.key === keywords && !modalGuess.classList.contains("hidden")) {
@@ -89,7 +81,6 @@ showButtons.forEach((button, index) => {
     modalColor.classList.add("hidden");
     overlay.classList.add("hidden");
   };
-});
 
 // Listening if button is clicked and showing according to that
 
@@ -97,18 +88,8 @@ eLClick(openModalWeek, "", modalButtonWeek);
 eLClick(openModalGuess, "", modalButtonGuess);
 eLClick(openModalDice, "", modalButtonDice);
 eLClick(openModalColor, "", modalButtonColor);
-closeButtons.forEach((button, index) => {
-    button.addEventListener('click', () => {
-        modals[index].classList.add('hidden');
-        overlay.classList.add('hidden');
-    });
-});
 
 eLClick(closeModalWeek, pressedKey, closeButtonWeek, overlay);
 eLClick(closeModalGuess, pressedKey, closeButtonGuess, overlay);
 eLClick(closeModalDice, pressedKey, closeButtonDice, overlay);
 eLClick(closeModalColor, pressedKey, closeButtonColor, overlay);
-overlay.addEventListener('click', () => {
-    modals.forEach(modal => modal.classList.add('hidden'));
-    overlay.classList.add('hidden');
-});
