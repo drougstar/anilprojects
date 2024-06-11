@@ -1,5 +1,5 @@
-const modals = document.querySelectorAll('.modal');
 const showButtons = document.querySelectorAll('.show-modal-week, .show-modal-guess, .show-modal-dice, .show-modal-color');
+const modals = document.querySelectorAll('.modal');
 const closeButtons = document.querySelectorAll('.close-modal');
 const overlay = document.querySelector('.overlay');
 
@@ -10,9 +10,9 @@ showButtons.forEach((button, index) => {
     });
 });
 
-closeButtons.forEach((button, index) => {
+closeButtons.forEach(button => {
     button.addEventListener('click', () => {
-        modals[index].classList.add('hidden');
+        button.closest('.modal').classList.add('hidden');
         overlay.classList.add('hidden');
     });
 });
