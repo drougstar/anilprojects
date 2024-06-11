@@ -1,11 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="style.css" />
     <title>Anil Projects</title>
+  </head>
   </head>
   <body>
     <button class="show-modal" onclick="location.href='https://anilprojects.com/'" type="button">
@@ -23,6 +22,30 @@
     <button class="show-modal-color">
       Random Color
     </button>
+    <div class="container">
+      <h1 class="my-4 text-center">Anil Projects</h1>
+      <div class="row">
+        <div class="col-md-3">
+          <button class="btn btn-primary btn-block mb-4" onclick="location.href='https://anilprojects.com/'">Home</button>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-secondary btn-block mb-4 show-modal-week">Week Number</button>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-secondary btn-block mb-4 show-modal-guess">Guess Number</button>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-secondary btn-block mb-4 show-modal-dice">Dice Number</button>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-secondary btn-block mb-4 show-modal-color">Random Color</button>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-secondary btn-block mb-4" onclick="location.href='task/index.html'">Task Tracker</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal week hidden">
       <button class="close-button-week close-modal">&times;</button>
       <h1>Week Number</h1>
@@ -33,7 +56,25 @@
       <button class="button-project-modal" onclick="location.href='https://week.anilprojects.com/'" type="button">
         Go
       </button>
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Week Number</h5>
+            <button type="button" class="close close-modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <img src=".resources/Banner_week.png" alt="Banner_week" class="img-fluid">
+            <p>This is a simple calculation project about displaying week number according to users input with dates</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-primary" onclick="location.href='https://week.anilprojects.com/'" type="button">Go</button>
+          </div>
+        </div>
+      </div>
     </div>
+
     <div class="modal guess hidden">
       <button class="close-button-guess close-modal">&times;</button>
       <h1>Guess Number</h1>
@@ -44,7 +85,25 @@
       <button class="button-project-modal" onclick="location.href='https://guess.anilprojects.com/'" type="button">
         Go
       </button>
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Guess Number</h5>
+            <button type="button" class="close close-modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <img src=".resources/Banner_guess.png" alt="Banner_guess" class="img-fluid">
+            <p>This is a simple and fun project about guessing a secret random number from 1 to 20 and recording your score relatively</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-primary" onclick="location.href='https://guess.anilprojects.com/'" type="button">Go</button>
+          </div>
+        </div>
+      </div>
     </div>
+
     <div class="modal dice hidden">
       <button class="close-button-dice close-modal">&times;</button>
       <h1>Dice Game</h1>
@@ -55,6 +114,23 @@
       <button class="button-project-modal" onclick="location.href='https://dice.anilprojects.com/'" type="button">
         Go
       </button>
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Dice Game</h5>
+            <button type="button" class="close close-modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <img src=".resources/Banner_dice.png" alt="Banner_dice" class="img-fluid">
+            <p>This is a fun project about risking or playing safe. You roll a dice and collect points relative to it. If the dice hits 1 before you holding the points, it removes all the collected points and you give your turn to 2nd player. If you hold the points before it happens then you lock all collected points and give your turn to 2nd player.</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-primary" onclick="location.href='https://dice.anilprojects.com/'" type="button">Go</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="modal color hidden">
@@ -67,10 +143,30 @@
       <button class="button-project-modal" onclick="location.href='https://color.anilprojects.com/'" type="button">
         Go
       </button>
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Random Color</h5>
+            <button type="button" class="close close-modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <img src=".resources/Banner_color.png" alt="Banner_color" class="img-fluid">
+            <p>This is a project about selecting random colors when you press a button with a library of simple color names or hex codes.</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-primary" onclick="location.href='https://color.anilprojects.com/'" type="button">Go</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="overlay hidden"></div>
 
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.4/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
     <script src="script.js"></script>
   </body>
 </html>
