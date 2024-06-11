@@ -10,33 +10,4 @@
 <body>
     <div class="container">
         <h1 class="my-4 text-center">Task Tracker</h1>
-        <form action="/add" method="post" class="mb-4">
-            <div class="form-group">
-                <input type="text" name="title" class="form-control" placeholder="Task Title" required>
-            </div>
-            <div class="form-group">
-                <textarea name="description" class="form-control" placeholder="Task Description"></textarea>
-            </div>
-            <button type="submit" class="btn btn-primary btn-block">Add Task</button>
-        </form>
-        <ul class="list-group">
-            {% for task in tasks %}
-            <li class="list-group-item d-flex justify-content-between align-items-center">
-                <a href="{{ url_for('task', id=task.id) }}">{{ task.title }}</a>
-                <div>
-                    {% if not task.start_time %}
-                    <a href="{{ url_for('start', id=task.id) }}" class="btn btn-success btn-sm">Start</a>
-                    {% elif not task.end_time %}
-                    <a href="{{ url_for('stop', id=task.id) }}" class="btn btn-danger btn-sm">Stop</a>
-                    {% endif %}
-                </div>
-            </li>
-            {% endfor %}
-        </ul>
-        <a href="{{ url_for('report') }}" class="btn btn-info btn-block mt-4">View Report</a>
-    </div>
-    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.4/dist/umd/popper.min.js"></script>
-    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
-</body>
-</html>
+        <form action="/add" method="post"

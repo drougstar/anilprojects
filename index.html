@@ -16,16 +16,16 @@
           <button class="btn btn-primary btn-block mb-4" onclick="location.href='https://anilprojects.com/'">Home</button>
         </div>
         <div class="col-md-4">
-          <button class="btn btn-secondary btn-block mb-4 show-modal-week">Week Number</button>
+          <button class="btn btn-secondary btn-block mb-4 show-modal" data-modal="week">Week Number</button>
         </div>
         <div class="col-md-4">
-          <button class="btn btn-secondary btn-block mb-4 show-modal-guess">Guess Number</button>
+          <button class="btn btn-secondary btn-block mb-4 show-modal" data-modal="guess">Guess Number</button>
         </div>
         <div class="col-md-4">
-          <button class="btn btn-secondary btn-block mb-4 show-modal-dice">Dice Number</button>
+          <button class="btn btn-secondary btn-block mb-4 show-modal" data-modal="dice">Dice Number</button>
         </div>
         <div class="col-md-4">
-          <button class="btn btn-secondary btn-block mb-4 show-modal-color">Random Color</button>
+          <button class="btn btn-secondary btn-block mb-4 show-modal" data-modal="color">Random Color</button>
         </div>
         <div class="col-md-4">
           <button class="btn btn-secondary btn-block mb-4" onclick="location.href='task/index.html'">Task Tracker</button>
@@ -33,12 +33,13 @@
       </div>
     </div>
 
-    <div class="modal week hidden">
-      <div class="modal-dialog">
+    <!-- Week Modal -->
+    <div class="modal fade" id="weekModal" tabindex="-1" role="dialog" aria-labelledby="weekModalLabel" aria-hidden="true">
+      <div class="modal-dialog" role="document">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Week Number</h5>
-            <button type="button" class="close close-modal" aria-label="Close">
+            <h5 class="modal-title" id="weekModalLabel">Week Number</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
               <span aria-hidden="true">&times;</span>
             </button>
           </div>
@@ -53,12 +54,13 @@
       </div>
     </div>
 
-    <div class="modal guess hidden">
-      <div class="modal-dialog">
+    <!-- Guess Modal -->
+    <div class="modal fade" id="guessModal" tabindex="-1" role="dialog" aria-labelledby="guessModalLabel" aria-hidden="true">
+      <div class="modal-dialog" role="document">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Guess Number</h5>
-            <button type="button" class="close close-modal" aria-label="Close">
+            <h5 class="modal-title" id="guessModalLabel">Guess Number</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
               <span aria-hidden="true">&times;</span>
             </button>
           </div>
@@ -73,12 +75,13 @@
       </div>
     </div>
 
-    <div class="modal dice hidden">
-      <div class="modal-dialog">
+    <!-- Dice Modal -->
+    <div class="modal fade" id="diceModal" tabindex="-1" role="dialog" aria-labelledby="diceModalLabel" aria-hidden="true">
+      <div class="modal-dialog" role="document">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Dice Game</h5>
-            <button type="button" class="close close-modal" aria-label="Close">
+            <h5 class="modal-title" id="diceModalLabel">Dice Game</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
               <span aria-hidden="true">&times;</span>
             </button>
           </div>
@@ -93,12 +96,13 @@
       </div>
     </div>
 
-    <div class="modal color hidden">
-      <div class="modal-dialog">
+    <!-- Color Modal -->
+    <div class="modal fade" id="colorModal" tabindex="-1" role="dialog" aria-labelledby="colorModalLabel" aria-hidden="true">
+      <div class="modal-dialog" role="document">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Random Color</h5>
-            <button type="button" class="close close-modal" aria-label="Close">
+            <h5 class="modal-title" id="colorModalLabel">Random Color</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
               <span aria-hidden="true">&times;</span>
             </button>
           </div>
@@ -112,8 +116,6 @@
         </div>
       </div>
     </div>
-
-    <div class="overlay hidden"></div>
 
     <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.4/dist/umd/popper.min.js"></script>
