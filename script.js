@@ -36,7 +36,7 @@ const modalWeek = document.querySelector(".week"),
       }
     });
     document.addEventListener("keydown", function (e) {
-      if (e.key === keywords && !modalDice.classList.contains("hidden")) {
+      if (e.key === keywords && !modalColor.classList.contains("hidden")) {
         closeModalColor();
       }
     });
