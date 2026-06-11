@@ -8,23 +8,47 @@
     <title>Anil Projects</title>
   </head>
   <body>
-    <button class="show-modal" onclick="location.href='https://anilprojects.com/'" type="button">
-      Home
-    </button>
-    <button class="show-modal-week">
-      Week Number
-    </button>
-    <button class="show-modal-guess">
-      Guess Number
-    </button>
-    <button class="show-modal-dice">
-      Dice Number
-    </button>
-    <button class="show-modal-color">
-      Random Color
-    </button>
-    <div class="modal week hidden">
-      <button class="close-button-week close-modal">&times;</button>
+    <!-- LEFT PANEL (pinned): navigation buttons that swap the content on the right -->
+    <aside class="sidebar">
+      <!-- Arrow: click to slide the panel open/closed. The ‹ / › flips by itself in CSS. -->
+      <button class="sidebar-toggle" aria-label="Hide or show the panel"></button>
+
+      <!-- HOW TO ADD A PANEL BUTTON (no JavaScript changes needed!):
+           1) Copy a button line below. Change data-view="..." to a new short tag,
+              and change the text to your label.
+           2) Add a matching section in <main>:  <section class="view view-YOURTAG"> ... </section>
+           The tag on the button (data-view) must match the view-TAG on the section. That's it. -->
+      <button class="nav-btn active" data-view="home">Home</button>
+      <button class="nav-btn" data-view="projects">Small Projects</button>
+    </aside>
+
+    <!-- MAIN CONTENT: only one "view" is shown at a time; the other is hidden -->
+    <main class="content">
+      <!-- Home view (shown by default) -->
+      <section class="view view-home">
+        <h1>Welcome to Anil Projects</h1>
+        <p>
+          Hi! This is my little corner of the web where I build small projects to learn and have fun.
+          Click <strong>Small Projects</strong> on the left to explore them.
+        </p>
+      </section>
+
+      <!-- Small Projects view (hidden until the panel button is clicked).
+           Each button opens the popup whose data-modal tag matches its own. -->
+      <section class="view view-projects hidden">
+        <button class="open-modal" data-modal="week">Week Number</button>
+        <button class="open-modal" data-modal="guess">Guess Number</button>
+        <button class="open-modal" data-modal="dice">Dice Number</button>
+        <button class="open-modal" data-modal="color">Random Color</button>
+      </section>
+    </main>
+
+    <!-- POPUPS ("modals"). HOW TO ADD ONE (no JavaScript changes needed!):
+         1) In the Small Projects view above, add: <button class="open-modal" data-modal="YOURTAG">Label</button>
+         2) Copy a modal block below and set the SAME data-modal="YOURTAG" on the <div>.
+         The matching tags are what link the button to its popup. -->
+    <div class="modal hidden" data-modal="week">
+      <button class="close-modal">&times;</button>
       <h1>Week Number</h1>
       <img src="https://raw.githubusercontent.com/drougstar/anilprojects/main/.resources/Banner_week.png" alt="Banner_week">
       <p>
@@ -34,8 +58,8 @@
         Go
       </button>
     </div>
-    <div class="modal guess hidden">
-      <button class="close-button-guess close-modal">&times;</button>
+    <div class="modal hidden" data-modal="guess">
+      <button class="close-modal">&times;</button>
       <h1>Guess Number</h1>
       <img src="https://raw.githubusercontent.com/drougstar/anilprojects/main/.resources/Banner_guess.png" alt="Banner_guess">
       <p>
@@ -45,8 +69,8 @@
         Go
       </button>
     </div>
-    <div class="modal dice hidden">
-      <button class="close-button-dice close-modal">&times;</button>
+    <div class="modal hidden" data-modal="dice">
+      <button class="close-modal">&times;</button>
       <h1>Dice Game</h1>
       <img src="https://raw.githubusercontent.com/drougstar/anilprojects/main/.resources/Banner_dice.png" alt="Banner_dice">
       <p>
@@ -56,8 +80,8 @@
         Go
       </button>
     </div>
-    <div class="modal color hidden">
-      <button class="close-button-color close-modal">&times;</button>
+    <div class="modal hidden" data-modal="color">
+      <button class="close-modal">&times;</button>
       <h1>Random Color</h1>
       <img src="https://raw.githubusercontent.com/drougstar/anilprojects/main/.resources/Banner_color.png" alt="Banner_color">
       <p>

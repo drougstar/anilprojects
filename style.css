@@ -13,23 +13,103 @@ body {
   font-family: sans-serif;
   color: #333;
   line-height: 1.5;
-  height: 100vh;
+  min-height: 100vh;
   position: relative;
+  /* Sidebar on the left, content on the right (a row) */
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
   background: linear-gradient(to top left, #28b487, #7dd56f);
 }
 
-.show-modal,
-.show-modal-dice,
-.show-modal-week,
-.show-modal-guess,
-.show-modal-color {
+/* -------------------------- */
+/* LEFT PANEL (pinned sidebar) */
+.sidebar {
+  position: sticky; /* stays put while the content scrolls */
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  width: 22rem;
+  flex-shrink: 0; /* never let it get squished */
+  display: flex;
+  flex-direction: column; /* stack the buttons vertically */
+  gap: 1.5rem;
+  padding: 2rem 1.5rem;
+  background-color: rgba(0, 0, 0, 0.15);
+  overflow: hidden; /* hide button text while it slides shut */
+  transition: width 0.3s ease; /* the smooth slide */
+}
+
+/* The little arrow button that hides/shows the panel */
+.sidebar-toggle {
+  align-self: flex-end; /* sits at the right edge of the panel */
+  width: 3rem;
+  height: 3rem;
+  border: none;
+  border-radius: 0.6rem;
+  background-color: #fff;
+  color: #444;
+  font-size: 2.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+/* The arrow character is set here, and flips automatically when collapsed */
+.sidebar-toggle::before {
+  content: "\2039"; /* ‹  means "click to hide" */
+}
+
+/* COLLAPSED state: panel shrinks to a thin bar; only the arrow shows */
+.sidebar.collapsed {
+  width: 3.5rem;
+  padding: 2rem 0.4rem;
+}
+.sidebar.collapsed .sidebar-toggle {
+  align-self: center;
+}
+.sidebar.collapsed .sidebar-toggle::before {
+  content: "\203A"; /* ›  means "click to show" */
+}
+.sidebar.collapsed .nav-btn {
+  display: none; /* hide the nav buttons while collapsed */
+}
+
+.nav-btn {
+  font-size: 1.8rem;
+  font-weight: 600;
+  padding: 1.4rem 2rem;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background-color: #fff;
+  color: #444;
+  border-radius: 1rem;
+  cursor: pointer;
+}
+
+/* the currently-selected panel button is highlighted */
+.nav-btn.active {
+  background-color: #0ea746;
+  color: #fff;
+}
+
+/* -------------------------- */
+/* MAIN CONTENT (the swappable area on the right) */
+.content {
+  flex: 1; /* take up all remaining width */
+  padding: 4rem 3rem;
+  overflow-y: auto;
+}
+
+/* the project buttons sit in a row and WRAP onto new lines when space runs out */
+.view-projects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2rem;
+  justify-content: center;
+}
+
+.open-modal {
   font-size: 2rem;
   font-weight: 600;
   padding: 1.75rem 3.5rem;
-  margin: 5rem 2rem;
   border: none;
   background-color: #fff;
   color: #444;
@@ -120,4 +200,51 @@ img {
   margin-left: auto;
   margin-right: auto;
   width: 50%;
+}
+
+/* -------------------------- */
+/* RESPONSIVE: when the window is narrow (phones, small windows),    */
+/* stack the panel on top and widen the text/popups so nothing       */
+/* overflows or looks squished.                                      */
+@media (max-width: 600px) {
+  body {
+    flex-direction: column; /* panel on top, content below */
+  }
+
+  .sidebar,
+  .sidebar.collapsed {
+    /* on phones the panel is a full-width top bar; collapsing is turned off */
+    position: static; /* no longer pinned when it's a top bar */
+    width: 100%;
+    height: auto;
+    padding: 1.5rem;
+    flex-direction: row; /* buttons side by side */
+  }
+
+  /* the collapse arrow is only useful on wide screens */
+  .sidebar-toggle {
+    display: none;
+  }
+  .sidebar.collapsed .nav-btn {
+    display: block; /* keep buttons visible on phones even if "collapsed" */
+  }
+
+  .content {
+    padding: 2rem 1.5rem;
+  }
+
+  /* popups and centered text were fixed at 50–70% — too narrow on phones */
+  .modal {
+    width: 90%;
+    padding: 3rem;
+  }
+
+  h1,
+  p {
+    width: 90%;
+  }
+
+  img {
+    width: 80%;
+  }
 }
