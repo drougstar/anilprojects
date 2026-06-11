@@ -34,3 +34,13 @@ git commit -m "Your message here"
 git push origin main
 # Sends the commit to GitHub. This is the step that PUBLISHES to the live site.
 ```
+
+## Fixing a stuck GitHub Pages deploy
+
+```bash
+touch .nojekyll
+# Creates an empty file named .nojekyll. It tells GitHub Pages: "serve my files as-is,
+# don't run the Jekyll build step." Good for a plain HTML/CSS/JS site like this one.
+# Committing + pushing this also triggers a fresh build, which can unstick a stuck deploy.
+```
+
