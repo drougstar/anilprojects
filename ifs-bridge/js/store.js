@@ -135,6 +135,7 @@ export const DEFAULTS = {
   payCurrency: 'TRY',
   restDaysPaid: true,       // Sundays and public holidays count as paid rest days in the pay estimate
   restDayHours: 7.5,        // 45 h / 6 days
+  payMinDay: 9,             // a worked weekday counts as at least this many regular hours for pay (8 h US days get +1)
   mapping: [
     { clockifyProjectId: '6a05ef24b89e127bf04311a6', clockifyProjectName: 'General', kind: 'general', regularHours: '',
       projectId: '202026', projectName: 'GENEL PROJE - 2026', subProjectId: '01', subProjectDesc: 'DEVAM EDEN FAALIYETLER',

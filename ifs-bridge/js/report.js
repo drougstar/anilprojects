@@ -22,7 +22,7 @@ async function fetchMonthHours(ym) {
   const c = new Clockify(s.clockify.apiKey);
   if (!s.clockify.userId) { const u = await c.user(); s.clockify.userId = u.id; s.clockify.workspaceId = u.activeWorkspace; ctx.saveSettings(s); }
   const { first, last } = monthDays(ym);
-  const byCode = {}, byActivity = {}, days = new Set();
+  const byCode = {}, byActivity = {}, byDay = {};
   for (let monday = mondayOf(first); monday <= last; monday = shift(monday, 7)) {
     const win = fetchWindow(monday, s.timeZone);
     const entries = await c.entries(s.clockify.workspaceId, s.clockify.userId, win.start, win.end);
@@ -33,12 +33,14 @@ async function fetchMonthHours(ym) {
         byCode[r.code] = Math.round(((byCode[r.code] || 0) + h) * 100) / 100;
         const a = r.mapping.shortName || r.mapping.clockifyProjectName;
         byActivity[a] = Math.round(((byActivity[a] || 0) + h) * 100) / 100;
-        days.add(d);
+        const day = byDay[d] || (byDay[d] = { regular: 0, total: 0, weekday: i < 5 });
+        day.total = Math.round((day.total + h) * 100) / 100;
+        if (r.code === s.codes.regular) day.regular = Math.round((day.regular + h) * 100) / 100;
       }
     });
   }
   const total = Math.round(Object.values(byCode).reduce((a, b) => a + b, 0) * 100) / 100;
-  const rec = { month: ym, fetchedAt: new Date().toISOString(), byCode, byActivity, total, days: days.size };
+  const rec = { month: ym, fetchedAt: new Date().toISOString(), byCode, byActivity, byDay, total, days: Object.keys(byDay).length };
   await db.setMeta(`hours.${ym}`, rec);
   return rec;
 }
@@ -61,10 +63,17 @@ function payFor(rec, s) {
   const rate = Number(s.payRate) || 0;
   const mult = { [s.codes.regular]: 1, [s.codes.ot15]: 1.5, [s.codes.ot2]: 2, [s.codes.travelRegular]: 1, [s.codes.travel]: 1 };
   const rows = Object.entries(rec.byCode).sort().map(([code, h]) => ({ code, desc: s.codeDescriptions?.[code] || '', hours: h, mult: mult[code] ?? 1, amount: Math.round(h * rate * (mult[code] ?? 1) * 100) / 100 }));
+  // Day minimum for pay: a worked weekday counts as at least payMinDay regular hours (9), so a
+  // day with 8 regular hours (US projects) gets 1 hour added.
+  const minDay = Number(s.payMinDay ?? 9) || 0;
+  let topUp = 0, topUpDays = 0;
+  for (const day of Object.values(rec.byDay || {})) if (day.weekday && day.regular > 0 && day.regular < minDay) { topUp += minDay - day.regular; topUpDays++; }
+  topUp = Math.round(topUp * 100) / 100;
+  if (topUp > 0) rows.push({ code: 'Min', desc: `Day minimum ${minDay} h: ${topUpDays} day${topUpDays === 1 ? '' : 's'} topped up`, hours: topUp, mult: 1, amount: Math.round(topUp * rate * 100) / 100 });
   const rest = restDays(rec.month, s);
   if (rest.hours > 0) rows.push({ code: 'Rest', desc: `Paid rest days: ${rest.sundays} Sunday${rest.sundays === 1 ? '' : 's'}${rest.holidays ? ` + ${rest.holidays} holiday${rest.holidays === 1 ? '' : 's'}` : ''} × ${rest.perDay} h`, hours: rest.hours, mult: 1, amount: Math.round(rest.hours * rate * 100) / 100 });
   const worked = Math.round(Object.values(rec.byCode).reduce((a, b) => a + b, 0) * 100) / 100;
-  return { rows, rest, worked, paidHours: Math.round((worked + rest.hours) * 100) / 100, amount: Math.round(rows.reduce((a, r) => a + r.amount, 0) * 100) / 100 };
+  return { rows, rest, topUp, topUpDays, worked, paidHours: Math.round((worked + topUp + rest.hours) * 100) / 100, amount: Math.round(rows.reduce((a, r) => a + r.amount, 0) * 100) / 100, needsReload: !rec.byDay };
 }
 
 async function renderHours(root, ym, allMonths) {
@@ -75,8 +84,9 @@ async function renderHours(root, ym, allMonths) {
   const cur = el('select', { class: 'cur' }, s.currencies.map(c => el('option', { value: c, selected: c === (s.payCurrency || 'TRY') }, c)));
   const restOn = el('input', { type: 'checkbox', checked: s.restDaysPaid !== false });
   const restH = el('input', { type: 'number', step: '0.5', inputmode: 'decimal', value: s.restDayHours ?? 7.5, class: 'rate-in short' });
-  const saveRate = () => { s.payRate = Number(String(rate.value).replace(',', '.')) || 0; s.payCurrency = cur.value; s.restDaysPaid = restOn.checked; s.restDayHours = Number(String(restH.value).replace(',', '.')) || 0; ctx.saveSettings(s); paint(); };
-  for (const i of [rate, cur, restOn, restH]) i.addEventListener('change', saveRate);
+  const minDay = el('input', { type: 'number', step: '0.5', inputmode: 'decimal', value: s.payMinDay ?? 9, class: 'rate-in short' });
+  const saveRate = () => { s.payRate = Number(String(rate.value).replace(',', '.')) || 0; s.payCurrency = cur.value; s.restDaysPaid = restOn.checked; s.restDayHours = Number(String(restH.value).replace(',', '.')) || 0; s.payMinDay = Number(String(minDay.value).replace(',', '.')) || 0; ctx.saveSettings(s); paint(); };
+  for (const i of [rate, cur, restOn, restH, minDay]) i.addEventListener('change', saveRate);
   const body = el('div');
   const status = el('span', { class: 'help status' });
   const paint = async () => {
@@ -95,8 +105,9 @@ async function renderHours(root, ym, allMonths) {
           card('Worked', `${pay.worked} h`, `${rec.days} day${rec.days === 1 ? '' : 's'} · regular ${rec.byCode[s.codes.regular] || 0} h`),
           card('Overtime', `${ot} h`, `${s.codes.ot15} + ${s.codes.ot2}`),
           card('Travel', `${travel} h`, `${s.codes.travelRegular} + ${s.codes.travel}`),
+          card('Day minimum', `${pay.topUp} h`, pay.needsReload ? 'press Load hours again to compute' : pay.topUp ? `${pay.topUpDays} day${pay.topUpDays === 1 ? '' : 's'} below ${s.payMinDay ?? 9} h topped up` : `every worked day has ${s.payMinDay ?? 9} h`),
           card('Rest days', `${pay.rest.hours} h`, pay.rest.hours ? `${pay.rest.sundays} Sunday${pay.rest.sundays === 1 ? '' : 's'}${pay.rest.holidays ? ` + ${pay.rest.holidays} holiday${pay.rest.holidays === 1 ? '' : 's'}` : ''} × ${pay.rest.perDay} h, paid` : 'not counted'),
-          card('Paid hours', `${pay.paidHours} h`, 'worked + rest days'),
+          card('Paid hours', `${pay.paidHours} h`, 'worked + day minimum + rest days'),
           card('Pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'type the hourly rate')),
         table(['Code', 'Description', 'Hours', '× rate', 'Amount'], pay.rows.map(r => [r.code, r.desc, String(r.hours), `× ${r.mult}`, s.payRate ? fmtMoney(r.amount, s.payCurrency) : '—'])),
         el('h4', {}, 'By activity'),
@@ -111,7 +122,7 @@ async function renderHours(root, ym, allMonths) {
     }
   };
   const loadBtn = el('button', { class: 'primary', disabled: !ym, onclick: async () => { loadBtn.disabled = true; status.textContent = 'Loading from Clockify…'; try { await fetchMonthHours(ym); status.textContent = ''; await paint(); } catch (e) { status.textContent = e.message; } loadBtn.disabled = false; } }, ym ? 'Load hours' : 'Pick a month to load');
-  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), el('span', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), el('label', { class: 'inline check' }, restOn, ' Sundays and holidays paid,', restH, ' h each'), loadBtn)), status, body);
+  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), el('span', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), el('label', { class: 'inline' }, 'Day minimum', minDay, ' h'), el('label', { class: 'inline check' }, restOn, ' Sundays and holidays paid,', restH, ' h each'), loadBtn)), status, body);
   await paint();
 }
 
