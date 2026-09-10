@@ -1,0 +1,15 @@
+{
+  "name": "IFS Bridge",
+  "short_name": "IFS Bridge",
+  "description": "Weekly hours from Clockify and monthly expenses, ready to paste into IFS.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F5F7F4",
+  "theme_color": "#0E6B87",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
