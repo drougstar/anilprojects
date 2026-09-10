@@ -43,11 +43,28 @@ async function fetchMonthHours(ym) {
   return rec;
 }
 
+// Paid rest days of a month: every Sunday, plus the public holidays listed in Settings that fall
+// on a weekday. Turkish payroll counts them at 45 h / 6 = 7.5 h each (editable).
+function restDays(ym, s) {
+  const { first, last } = monthDays(ym);
+  let sundays = 0, holidays = 0;
+  for (let d = first; d <= last; d = shift(d, 1)) {
+    const dow = new Date(d + 'T00:00:00Z').getUTCDay();
+    if (dow === 0) sundays++;
+    else if (dow !== 6 && (s.holidays || []).includes(d)) holidays++;
+  }
+  const perDay = Number(s.restDayHours ?? 7.5) || 0;
+  return { sundays, holidays, hours: s.restDaysPaid === false ? 0 : Math.round((sundays + holidays) * perDay * 100) / 100, perDay };
+}
+
 function payFor(rec, s) {
   const rate = Number(s.payRate) || 0;
   const mult = { [s.codes.regular]: 1, [s.codes.ot15]: 1.5, [s.codes.ot2]: 2, [s.codes.travelRegular]: 1, [s.codes.travel]: 1 };
   const rows = Object.entries(rec.byCode).sort().map(([code, h]) => ({ code, desc: s.codeDescriptions?.[code] || '', hours: h, mult: mult[code] ?? 1, amount: Math.round(h * rate * (mult[code] ?? 1) * 100) / 100 }));
-  return { rows, amount: Math.round(rows.reduce((a, r) => a + r.amount, 0) * 100) / 100 };
+  const rest = restDays(rec.month, s);
+  if (rest.hours > 0) rows.push({ code: 'Rest', desc: `Paid rest days: ${rest.sundays} Sunday${rest.sundays === 1 ? '' : 's'}${rest.holidays ? ` + ${rest.holidays} holiday${rest.holidays === 1 ? '' : 's'}` : ''} × ${rest.perDay} h`, hours: rest.hours, mult: 1, amount: Math.round(rest.hours * rate * 100) / 100 });
+  const worked = Math.round(Object.values(rec.byCode).reduce((a, b) => a + b, 0) * 100) / 100;
+  return { rows, rest, worked, paidHours: Math.round((worked + rest.hours) * 100) / 100, amount: Math.round(rows.reduce((a, r) => a + r.amount, 0) * 100) / 100 };
 }
 
 async function renderHours(root, ym, allMonths) {
@@ -56,8 +73,10 @@ async function renderHours(root, ym, allMonths) {
   root.append(host);
   const rate = el('input', { type: 'number', step: '0.01', inputmode: 'decimal', value: s.payRate || '', placeholder: '0.00', class: 'rate-in' });
   const cur = el('select', { class: 'cur' }, s.currencies.map(c => el('option', { value: c, selected: c === (s.payCurrency || 'TRY') }, c)));
-  const saveRate = () => { s.payRate = Number(String(rate.value).replace(',', '.')) || 0; s.payCurrency = cur.value; ctx.saveSettings(s); paint(); };
-  rate.addEventListener('change', saveRate); cur.addEventListener('change', saveRate);
+  const restOn = el('input', { type: 'checkbox', checked: s.restDaysPaid !== false });
+  const restH = el('input', { type: 'number', step: '0.5', inputmode: 'decimal', value: s.restDayHours ?? 7.5, class: 'rate-in short' });
+  const saveRate = () => { s.payRate = Number(String(rate.value).replace(',', '.')) || 0; s.payCurrency = cur.value; s.restDaysPaid = restOn.checked; s.restDayHours = Number(String(restH.value).replace(',', '.')) || 0; ctx.saveSettings(s); paint(); };
+  for (const i of [rate, cur, restOn, restH]) i.addEventListener('change', saveRate);
   const body = el('div');
   const status = el('span', { class: 'help status' });
   const paint = async () => {
@@ -69,27 +88,30 @@ async function renderHours(root, ym, allMonths) {
       const rec = recs[0];
       if (!rec) { body.append(el('p', { class: 'muted' }, 'Not loaded yet for this month.')); return; }
       const pay = payFor(rec, s);
+      const ot = Math.round(((rec.byCode[s.codes.ot15] || 0) + (rec.byCode[s.codes.ot2] || 0)) * 100) / 100;
+      const travel = Math.round(((rec.byCode[s.codes.travelRegular] || 0) + (rec.byCode[s.codes.travel] || 0)) * 100) / 100;
       body.append(
         el('div', { class: 'ov-cards' },
-          card('Hours', `${rec.total} h`, `${rec.days} day${rec.days === 1 ? '' : 's'} worked`),
-          card('Regular', `${rec.byCode[s.codes.regular] || 0} h`, s.codes.regular),
-          card('Overtime', `${Math.round(((rec.byCode[s.codes.ot15] || 0) + (rec.byCode[s.codes.ot2] || 0)) * 100) / 100} h`, `${s.codes.ot15} + ${s.codes.ot2}`),
-          card('Travel', `${Math.round(((rec.byCode[s.codes.travelRegular] || 0) + (rec.byCode[s.codes.travel] || 0)) * 100) / 100} h`, `${s.codes.travelRegular} + ${s.codes.travel}`),
+          card('Worked', `${pay.worked} h`, `${rec.days} day${rec.days === 1 ? '' : 's'} · regular ${rec.byCode[s.codes.regular] || 0} h`),
+          card('Overtime', `${ot} h`, `${s.codes.ot15} + ${s.codes.ot2}`),
+          card('Travel', `${travel} h`, `${s.codes.travelRegular} + ${s.codes.travel}`),
+          card('Rest days', `${pay.rest.hours} h`, pay.rest.hours ? `${pay.rest.sundays} Sunday${pay.rest.sundays === 1 ? '' : 's'}${pay.rest.holidays ? ` + ${pay.rest.holidays} holiday${pay.rest.holidays === 1 ? '' : 's'}` : ''} × ${pay.rest.perDay} h, paid` : 'not counted'),
+          card('Paid hours', `${pay.paidHours} h`, 'worked + rest days'),
           card('Pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'type the hourly rate')),
         table(['Code', 'Description', 'Hours', '× rate', 'Amount'], pay.rows.map(r => [r.code, r.desc, String(r.hours), `× ${r.mult}`, s.payRate ? fmtMoney(r.amount, s.payCurrency) : '—'])),
         el('h4', {}, 'By activity'),
         table(['Activity', 'Hours'], Object.entries(rec.byActivity).sort().map(([a, h]) => [a, String(h)])),
-        el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify with the Week tab rules. Overtime ×1.5 and ×2, travel ×1; change the multipliers in the code if your contract differs.`));
+        el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify with the Week tab rules. Regular, travel and rest days ×1, overtime ×1.5 and ×2. Holidays come from Settings → Rules → Holidays.`));
     } else {
       if (!recs.length) { body.append(el('p', { class: 'muted' }, 'No month loaded yet. Pick a month above and press Load hours.')); return; }
-      const rows = recs.sort((a, b) => b.month.localeCompare(a.month)).map(r => { const p = payFor(r, s); return [monthLabel(r.month), String(r.total), String(r.byCode[s.codes.regular] || 0), String(Math.round(((r.byCode[s.codes.ot15] || 0) + (r.byCode[s.codes.ot2] || 0)) * 100) / 100), String(Math.round(((r.byCode[s.codes.travelRegular] || 0) + (r.byCode[s.codes.travel] || 0)) * 100) / 100), s.payRate ? fmtMoney(p.amount, s.payCurrency) : '—']; });
-      const sum = recs.reduce((a, r) => a + payFor(r, s).amount, 0);
-      body.append(table(['Month', 'Hours', 'Regular', 'Overtime', 'Travel', 'Pay estimate'], [...rows, ['Total', String(Math.round(recs.reduce((a, r) => a + r.total, 0) * 100) / 100), '', '', '', s.payRate ? fmtMoney(Math.round(sum * 100) / 100, s.payCurrency) : '—']]),
+      const rows = recs.sort((a, b) => b.month.localeCompare(a.month)).map(r => { const p = payFor(r, s); return [monthLabel(r.month), String(p.worked), String(r.byCode[s.codes.regular] || 0), String(Math.round(((r.byCode[s.codes.ot15] || 0) + (r.byCode[s.codes.ot2] || 0)) * 100) / 100), String(Math.round(((r.byCode[s.codes.travelRegular] || 0) + (r.byCode[s.codes.travel] || 0)) * 100) / 100), String(p.rest.hours), String(p.paidHours), s.payRate ? fmtMoney(p.amount, s.payCurrency) : '—']; });
+      const tot = recs.reduce((a, r) => { const p = payFor(r, s); a.worked += p.worked; a.paid += p.paidHours; a.amount += p.amount; return a; }, { worked: 0, paid: 0, amount: 0 });
+      body.append(table(['Month', 'Worked', 'Regular', 'Overtime', 'Travel', 'Rest days', 'Paid hours', 'Pay estimate'], [...rows, ['Total', String(Math.round(tot.worked * 100) / 100), '', '', '', '', String(Math.round(tot.paid * 100) / 100), s.payRate ? fmtMoney(Math.round(tot.amount * 100) / 100, s.payCurrency) : '—']]),
         el('small', { class: 'help' }, `${recs.length} month${recs.length === 1 ? '' : 's'} loaded. Months are loaded one at a time: pick one above and press Load hours.`));
     }
   };
   const loadBtn = el('button', { class: 'primary', disabled: !ym, onclick: async () => { loadBtn.disabled = true; status.textContent = 'Loading from Clockify…'; try { await fetchMonthHours(ym); status.textContent = ''; await paint(); } catch (e) { status.textContent = e.message; } loadBtn.disabled = false; } }, ym ? 'Load hours' : 'Pick a month to load');
-  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), el('span', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), loadBtn)), status, body);
+  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), el('span', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), el('label', { class: 'inline check' }, restOn, ' Sundays and holidays paid,', restH, ' h each'), loadBtn)), status, body);
   await paint();
 }
 

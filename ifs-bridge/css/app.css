@@ -133,6 +133,7 @@ td.empty{text-align:center;padding:24px}
 .ov-section{margin:18px 0}
 .ov-section .section-head{margin:0 0 6px}
 .rate-in{width:8em}
+.rate-in.short{width:5em}
 .ov-section .cur{width:auto}
 .ov-section h4{margin:0 0 8px;font-size:15px}
 
