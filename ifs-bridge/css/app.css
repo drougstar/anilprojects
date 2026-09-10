@@ -131,6 +131,9 @@ td.empty{text-align:center;padding:24px}
 .ov-card .k{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
 .ov-card b{display:block;font-size:20px;font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;margin:2px 0}
 .ov-section{margin:18px 0}
+.ov-section .section-head{margin:0 0 6px}
+.rate-in{width:8em}
+.ov-section .cur{width:auto}
 .ov-section h4{margin:0 0 8px;font-size:15px}
 
 /* ---------- settings ---------- */

@@ -589,7 +589,7 @@ function rebuildTemplate(rec) {
 // ---------- boot ----------
 function boot() {
   initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), el, $ });
-  initReport({ settings: () => settings });
+  initReport({ settings: () => settings, saveSettings: s => saveSettings(s) });
   $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
   $('#btn-bulk').addEventListener('click', openBulkDialog);
   if (settings.clockify.apiKey) renderWeekStrip();

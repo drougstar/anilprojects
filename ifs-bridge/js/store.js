@@ -131,6 +131,8 @@ export const DEFAULTS = {
   tcmbField: 'ForexBuying', // which TCMB column IFS uses: ForexBuying (döviz alış), ForexSelling, BanknoteBuying, BanknoteSelling
   currRateMode: 'blank',    // when no rate is known: blank = send the field empty | omit = leave the field out | one = always 1
   perDiemDefaults: [],      // [{ country: 'USA', rate: 70, currency: 'USD' }] used to prefill a new trip
+  payRate: 0,               // hourly salary rate for the pay estimate on the Overview tab
+  payCurrency: 'TRY',
   mapping: [
     { clockifyProjectId: '6a05ef24b89e127bf04311a6', clockifyProjectName: 'General', kind: 'general', regularHours: '',
       projectId: '202026', projectName: 'GENEL PROJE - 2026', subProjectId: '01', subProjectDesc: 'DEVAM EDEN FAALIYETLER',
