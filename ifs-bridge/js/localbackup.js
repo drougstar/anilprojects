@@ -28,11 +28,30 @@ export async function pushBackup() {
     if (!res.ok) throw new Error(`server ${res.status}`);
     const r = await res.json();
     lastResult = { at: r.savedAt, error: '' };
+    await pushReceipts();
   } catch (e) {
     lastResult = { at: lastResult.at, error: e.message };
   }
   document.dispatchEvent(new CustomEvent('ifsbridge:backup', { detail: lastResult }));
   return lastResult;
+}
+
+// Receipt photos go to the PC too (data/receipts/<id>.jpg), one file each, once.
+async function pushReceipts() {
+  for (const rc of await db.all('receipts')) {
+    if (!rc.blob || rc.pc) continue;
+    const res = await fetch(`/api/receipt/${rc.id}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: rc.blob });
+    if (res.ok) await db.put('receipts', { ...rc, pc: true });
+  }
+}
+
+// A photo kept on the PC (when the browser store lost it, or it was taken on another device that backed up here).
+export async function pcReceipt(id) {
+  if (!LOCAL) return null;
+  try {
+    const res = await fetch(`/api/receipt/${id}`, { cache: 'no-store' });
+    return res.ok ? await res.blob() : null;
+  } catch { return null; }
 }
 
 export function scheduleBackup(delay = 2000) {

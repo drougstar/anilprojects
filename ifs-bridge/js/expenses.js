@@ -3,7 +3,7 @@
 // No alert/confirm pop-ups (the Claude browser pane hides them).
 import { db, save, softDelete, live, uuid } from './db.js';
 import { Supabase } from './supabase.js';
-import { sync, receiptBlob } from './sync.js';
+import { sync, receiptBlob, receiptErrors } from './sync.js';
 import { buildExpenseExport, numberReceipts, referenceText, totalsByCurrency, fmtMoney, lineOrder, linesFromIfsRecords, rateKey, rateFor } from './expense-ifs.js';
 import { parseCopyObjects } from './ifs.js';
 import { loadSettings, saveSettings } from './store.js';
@@ -416,10 +416,14 @@ function openLineDialog(line, prefill = null) {
 
   function paintGallery() {
     gallery.replaceChildren(...photos.map(p => {
-      const img = el('img', { alt: 'Receipt', onclick: () => { if (p.blob) openPhotoDialog(p.blob); } });
-      if (p.blob) img.src = URL.createObjectURL(p.blob);
-      else receiptBlob(supabaseClient(), p.id).then(b => { if (b) { p.blob = b; img.src = URL.createObjectURL(b); } });
-      return el('span', { class: 'thumb' }, img, el('button', { type: 'button', class: 'thumb-x', title: 'Remove photo', 'aria-label': 'Remove photo', onclick: () => { photos.splice(photos.indexOf(p), 1); paintGallery(); } }, '×'));
+      const img = el('img', { alt: 'Receipt', hidden: !p.blob, onclick: () => { if (p.blob) openPhotoDialog(p.blob); } });
+      const missing = el('span', { class: 'thumb-missing', hidden: !!p.blob }, el('b', {}, 'Photo not on this device'), el('small', {}, 'Looking for it…'), el('button', { type: 'button', class: 'link', onclick: () => { missing.querySelector('small').textContent = 'Looking for it…'; fetchIt(); } }, 'Retry'));
+      const fetchIt = () => receiptBlob(supabaseClient(), p.id).then(b => {
+        if (b) { p.blob = b; img.src = URL.createObjectURL(b); img.hidden = false; missing.hidden = true; }
+        else missing.querySelector('small').textContent = receiptErrors.get(p.id) || 'Could not find it.';
+      });
+      if (p.blob) img.src = URL.createObjectURL(p.blob); else fetchIt();
+      return el('span', { class: 'thumb' }, img, missing, el('button', { type: 'button', class: 'thumb-x', title: 'Remove photo', 'aria-label': 'Remove photo', onclick: () => { photos.splice(photos.indexOf(p), 1); paintGallery(); } }, '×'));
     }));
   }
   function setBiz(b) { business = b; bizBtn.classList.toggle('on', b); persBtn.classList.toggle('on', !b); bizHelp.textContent = b ? 'Exported to IFS with the reference shown below.' : 'Stays in the app only. Useful to track spending on a per diem trip.'; receiptRow.hidden = !b; shortField.hidden = !b; updateRef(); }

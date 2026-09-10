@@ -80,7 +80,7 @@ export class Supabase {
 
   async downloadReceipt(id) {
     const res = await fetch(`${this.url}/storage/v1/object/authenticated/receipts/${this.userId}/${id}.jpg`, { headers: await this.headers() });
-    if (!res.ok) return null;
+    if (!res.ok) throw new Error(`storage ${res.status}`);
     return res.blob();
   }
 }

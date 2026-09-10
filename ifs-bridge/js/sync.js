@@ -2,6 +2,7 @@
 // Server rows are { id, user_id, updated_at, deleted, data } where data holds the whole
 // app record, so the app can add fields without touching the database.
 import { db, TABLES } from './db.js';
+import { pcReceipt } from './localbackup.js';
 
 let running = false;
 
@@ -68,12 +69,25 @@ export async function checkSetup(client) {
   }
 }
 
-// Fetch a receipt photo, from local store first, else from Supabase (and cache it).
+// Why a photo could not be shown, by receipt id (for the placeholder in the dialog).
+export const receiptErrors = new Map();
+
+// Fetch a receipt photo: browser store first, then the PC backup (when served from the PC),
+// then Supabase Storage; whatever is found is cached in the browser store.
 export async function receiptBlob(client, id) {
   const local = await db.get('receipts', id);
   if (local?.blob) return local.blob;
-  if (!client.signedIn) return null;
-  const blob = await client.downloadReceipt(id);
-  if (blob) await db.put('receipts', { id, blob, dirty: false });
-  return blob;
+  const fromPc = await pcReceipt(id);
+  if (fromPc) { await db.put('receipts', { id, blob: fromPc, dirty: false, pc: true }); return fromPc; }
+  if (!client.configured) { receiptErrors.set(id, 'Taken on another device. Set up sync in Settings to fetch it.'); return null; }
+  if (!client.signedIn) { receiptErrors.set(id, 'Not signed in to sync; sign in under Settings to fetch it.'); return null; }
+  try {
+    const blob = await client.downloadReceipt(id);
+    await db.put('receipts', { id, blob, dirty: false });
+    receiptErrors.delete(id);
+    return blob;
+  } catch (e) {
+    receiptErrors.set(id, /404/.test(e.message) ? 'Not uploaded yet: open the app on the device where the photo was taken and press Sync now.' : `Download failed: ${e.message}`);
+    return null;
+  }
 }

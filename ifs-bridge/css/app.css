@@ -166,6 +166,8 @@ table.rates-tbl{font-size:13.5px;margin-top:8px} table.rates-tbl td,table.rates-
 .thumb{position:relative;display:inline-block}
 .thumb img{height:96px;width:auto;max-width:160px;border-radius:8px;border:1px solid var(--rule);display:block;cursor:zoom-in;object-fit:cover}
 .thumb-x{position:absolute;top:-8px;right:-8px;width:26px;height:26px;min-height:0;padding:0;border-radius:50%;font-size:15px;line-height:1;background:var(--warn);color:#fff;border:none}
+.thumb-missing{display:flex;flex-direction:column;gap:2px;justify-content:center;width:160px;min-height:96px;padding:8px 10px;border:1px dashed var(--rule);border-radius:8px;background:var(--surface-2);font-size:12.5px}
+.thumb-missing b{font-size:12.5px} .thumb-missing small{font-size:11.5px;line-height:1.3} .thumb-missing .link{align-self:flex-start;padding:2px 0;font-size:12.5px}
 .rates{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}
 .rate{display:flex;align-items:center;gap:8px;font-size:14.5px}
 .rate input{width:11em;flex:0 0 auto}
