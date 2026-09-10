@@ -119,6 +119,7 @@ export async function render() {
 async function refresh(parts = ['head', 'summary', 'list', 'trips']) { await load(); paint(parts); }
 function paintAll() { paint(['help', 'head', 'summary', 'tools', 'list', 'trips']); }
 function paint(parts) {
+  if (!built || !$('#exp-list')) return;   // Expenses tab not opened yet in this session: nothing to repaint
   for (const p of parts) ({ help: paintHelp, head: paintHead, summary: paintSummary, tools: paintTools, list: paintList, trips: paintTrips })[p]();
 }
 
