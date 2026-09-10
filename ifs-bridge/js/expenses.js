@@ -197,7 +197,7 @@ function paintSummary() {
   const expNew = buildExpenseExport(sheet, lines, s, rateCache.byKey, { onlyNew: true });
 
   // fetch missing rates in the background, then repaint once
-  if (expAll.unrated.length && s.rateSource !== 'manual' && LOCAL) ensureRates(lines).then(got => { if (got) paintSummary(); });
+  if (expAll.unrated.length && s.rateSource !== 'manual') ensureRates(lines).then(got => { if (got) paintSummary(); });
 
   const copy = async exp => {
     try { await navigator.clipboard.writeText(exp.text); toast(`Copied ${exp.count} line${exp.count === 1 ? '' : 's'}. Paste into the IFS Expense Details grid.`); if (sheet.status === 'open') { await save('sheets', { ...sheet, status: 'exported' }); refresh(['head', 'summary']); scheduleSync(); } }
