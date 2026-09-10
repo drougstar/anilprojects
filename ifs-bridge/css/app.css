@@ -110,7 +110,7 @@ td.empty{text-align:center;padding:24px}
 .entry small{flex-basis:100%;display:block}
 
 /* ---------- folds (settings sections, "more options") ---------- */
-details.set-fold>summary{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:16px;font-weight:600;color:var(--ink);padding:2px 0;list-style:none}
+details.set-fold>summary{display:flex;justify-content:flex-start;align-items:baseline;gap:8px;font-size:16px;font-weight:600;color:var(--ink);padding:2px 0;list-style:none;cursor:pointer}
 details.set-fold>summary::-webkit-details-marker{display:none}
 details.set-fold>summary::before{content:"▸";display:inline-block;width:1em;color:var(--ink-3);margin-right:4px}
 details.set-fold[open]>summary::before{content:"▾"}
