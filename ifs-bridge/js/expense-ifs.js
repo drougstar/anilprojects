@@ -76,7 +76,7 @@ export function buildExpenseExport(sheet, lines, settings, ratesByKey = {}, { on
   const warnings = [];
   if (missingShortName) warnings.push(`${missingShortName} line${missingShortName === 1 ? '' : 's'} without a project short name; IFS will ask for it after the paste.`);
   const unrated = [...new Set(rates.filter(r => r.source === 'none').map(r => `${r.cur} ${r.date}`))];
-  if (unrated.length) warnings.push(`No rate for ${unrated.slice(0, 4).join(', ')}${unrated.length > 4 ? ` and ${unrated.length - 4} more` : ''}. ${settings.rateSource === 'manual' ? 'Type it under Sheets…' : 'Start the app from the PC (Start IFS Bridge.cmd) so the rates can be fetched, or type them under Sheets…'}`);
+  if (unrated.length) warnings.push(`No rate for ${unrated.slice(0, 4).join(', ')}${unrated.length > 4 ? ` and ${unrated.length - 4} more` : ''}. ${settings.rateSource === 'manual' ? 'Type it under Sheets…' : 'Rates are fetched for each line date (Central Bank, published daily); a date can only be missing if it is in the future or the rate file has not been published yet. You can also type a rate under Sheets…'}`);
   return { text: joinRecords(records), count: records.length, total: allBusiness.length, error, warning: warnings.join(' '), warnings, missingShortName, unrated, rates };
 }
 

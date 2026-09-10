@@ -20,6 +20,7 @@
            The tag on the button (data-view) must match the view-TAG on the section. That's it. -->
       <button class="nav-btn active" data-view="home">Home</button>
       <button class="nav-btn" data-view="projects">Small Projects</button>
+      <button class="nav-btn" data-view="tools">Tools</button>
     </aside>
 
     <!-- MAIN CONTENT: only one "view" is shown at a time; the other is hidden -->
@@ -40,6 +41,10 @@
         <button class="open-modal" data-modal="guess">Guess Number</button>
         <button class="open-modal" data-modal="dice">Dice Number</button>
         <button class="open-modal" data-modal="color">Random Color</button>
+      </section>
+      <!-- Tools view: apps I use for work -->
+      <section class="view view-tools hidden">
+        <button class="open-modal" data-modal="ifsbridge">IFS Bridge</button>
       </section>
     </main>
 
@@ -88,6 +93,18 @@
         This is a project about selecting random colors when you press a button with a library of simple color names or hex codes.
       </p>
       <button class="button-project-modal" onclick="location.href='https://color.anilprojects.com/'" type="button">
+        Go
+      </button>
+    </div>
+
+    <div class="modal hidden" data-modal="ifsbridge">
+      <button class="close-modal">&times;</button>
+      <h1>IFS Bridge</h1>
+      <img src="https://raw.githubusercontent.com/drougstar/anilprojects/main/.resources/Banner_ifsbridge.png" alt="Banner_ifsbridge">
+      <p>
+        My expense and timesheet companion for IFS: enter expenses on the phone or the PC, pull the week's hours from Clockify, and paste everything into IFS in one go. Works offline and syncs between devices.
+      </p>
+      <button class="button-project-modal" onclick="location.href='https://ifsbridge.anilprojects.com/'" type="button">
         Go
       </button>
     </div>

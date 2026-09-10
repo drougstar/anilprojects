@@ -74,10 +74,29 @@ async function load() {
 
 async function setSheet(id) { state.sheetId = id; await db.setMeta('currentSheet', id); paintAll(); }
 
-// Rates for the line's date, fetched through the PC server (TCMB) and cached.
+// Rates for the line's date (TCMB), cached per device. On the PC the local server fetches
+// them live; anywhere else the app reads the daily JSON files published with it
+// (rates/YYYY-MM-DD.json, updated every day by the site's GitHub Action).
+const dayFiles = new Map();
+async function staticDay(date) {
+  if (!dayFiles.has(date)) dayFiles.set(date, fetch(`./rates/${date}.json`, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null));
+  return dayFiles.get(date);
+}
+async function staticRate(cur, date, field) {
+  for (let back = 0; back < 10; back++) {
+    const d = shiftIso(date, -back);
+    const day = await staticDay(d);
+    if (!day) { if (back === 0) continue; else return null; }   // missing file: today not published yet, or before the archive
+    if (day.none) continue;
+    const e = day.rates?.[cur];
+    if (!e || !(Number(e[field]) > 0)) return null;
+    return { rate: e[field], usedDate: d, source: 'tcmb' };
+  }
+  return null;
+}
 async function ensureRates(lines) {
   const s = settings();
-  if (!LOCAL || s.rateSource === 'manual') return false;
+  if (s.rateSource === 'manual') return false;
   const home = homeCur();
   const wanted = [...new Set(lines.filter(l => l.business && (l.currency || '').toUpperCase() !== home && l.date).map(l => rateKey(l.currency, l.date)))]
     .filter(k => !rateCache.byKey[k] && !rateFailed.has(k));
@@ -87,10 +106,14 @@ async function ensureRates(lines) {
   for (const k of wanted) {
     const [cur, date] = k.split('|');
     try {
-      const r = await fetch(`/api/rate?cur=${encodeURIComponent(cur)}&date=${date}&field=${encodeURIComponent(rateCache.field)}`, { cache: 'no-store' });
-      const j = await r.json();
-      if (r.ok && Number(j.rate) > 0) { rateCache.byKey[k] = { rate: j.rate, usedDate: j.usedDate, source: j.source }; got++; }
-      else rateFailed.add(k);
+      let hit = null;
+      if (LOCAL) {
+        const r = await fetch(`/api/rate?cur=${encodeURIComponent(cur)}&date=${date}&field=${encodeURIComponent(rateCache.field)}`, { cache: 'no-store' });
+        const j = await r.json();
+        if (r.ok && Number(j.rate) > 0) hit = { rate: j.rate, usedDate: j.usedDate, source: j.source };
+      }
+      if (!hit) hit = await staticRate(cur, date, rateCache.field);
+      if (hit) { rateCache.byKey[k] = hit; got++; } else rateFailed.add(k);
     } catch { rateFailed.add(k); }
   }
   if (got) await db.setMeta('rateCache', rateCache);
