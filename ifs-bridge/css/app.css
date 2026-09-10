@@ -22,6 +22,7 @@
 
 /* ---------- base ---------- */
 *{box-sizing:border-box}
+[hidden]{display:none !important}   /* the hidden attribute must beat display:flex/grid on the same element */
 html{font-size:16px}
 html,body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,"Segoe UI",Roboto,sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased}
 button,input,select,textarea{font:inherit;color:inherit}
