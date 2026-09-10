@@ -234,16 +234,18 @@ function paintSummary() {
     el('summary', {}, `Month close ${allDone ? '✓ complete' : `· ${items.filter(i => !i[0]).length} open`}`),
     el('ul', { class: 'checklist' }, items.map(([ok, label, note]) => el('li', {}, el('span', { class: 'mark ' + (ok ? 'ok' : 'todo') }, ok ? '✓' : '○'), el('span', {}, el('b', {}, label), ' ', el('small', {}, note))))));
 
+  const ratesOk = foreign.length === 0 || expAll.unrated.length === 0;
+  const stateText = expAll.error ? expAll.error : sheet.status === 'entered' ? `In IFS ${fmtWhen(sheet.enteredAt)}${newCount ? ` · ${newCount} new line${newCount === 1 ? '' : 's'} not in IFS yet` : ''}` : sheet.status === 'exported' ? 'Copied; after saving in IFS press Mark as entered' : '';
   host.replaceChildren(
     el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'To IFS'), el('b', {}, money(biz)), el('small', {}, `${biz.length} line${biz.length === 1 ? '' : 's'} · ${biz.filter(l => l.receipt).length} with receipt${enteredCount ? ` · ${enteredCount} in IFS` : ''}`)),
     el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'Personal'), el('b', {}, money(pers)), el('small', {}, `${pers.length} line${pers.length === 1 ? '' : 's'}, stays here`)),
-    el('div', { class: 'sum-project' }, el('span', { class: 'k' }, 'IFS project'),
-      sheet.shortName ? el('code', {}, sheet.shortName) : el('span', { class: 'warn-text' }, 'not set'),
-      el('span', { class: 'k' }, 'Rates'), el('span', { class: expAll.unrated.length ? 'warn-text' : 'muted' }, rateText),
-      el('button', { class: 'link', onclick: openSheetsDialog }, 'change')),
-    el('div', { class: 'sum-actions' }, copyBtn, copyAllBtn, viewBtn, enteredBtn,
-      el('small', { class: 'help' }, expAll.error ? expAll.error : sheet.status === 'entered' ? `Entered in IFS ${fmtWhen(sheet.enteredAt)}.${newCount ? ` ${newCount} new line${newCount === 1 ? '' : 's'} not in IFS yet.` : ''}` : sheet.status === 'exported' ? 'Copied before. After saving in IFS press “Mark as entered”.' : `${expAll.count} business line${expAll.count === 1 ? '' : 's'} will be exported.`),
-      ...expAll.warnings.map(w => el('small', { class: 'help warn-text' }, w))),
+    el('div', { class: 'sum-line' },
+      sheet.shortName ? el('code', {}, sheet.shortName) : el('span', { class: 'warn-text' }, 'project short name not set'),
+      el('span', { class: ratesOk ? 'muted' : 'warn-text', title: rateText }, ratesOk ? 'rates ✓' : `${expAll.unrated.length} line${expAll.unrated.length === 1 ? '' : 's'} without a rate`),
+      el('button', { class: 'link', onclick: openSheetsDialog }, 'change'),
+      stateText ? el('span', { class: expAll.error ? 'warn-text' : 'muted' }, stateText) : null),
+    el('div', { class: 'sum-actions' }, copyBtn, copyAllBtn, enteredBtn, viewBtn,
+      ...expAll.warnings.filter(w => !/without a rate/.test(w) || !ratesOk).map(w => el('small', { class: 'help warn-text' }, w))),
     checklist);
 }
 
@@ -340,10 +342,12 @@ function paintTrips() {
         el('span', {}, el('i', {}, 'Per diem'), fmt(income)), el('span', {}, el('i', {}, 'Out of pocket'), fmt(pocket)),
         el('span', {}, el('i', {}, 'Reimbursed'), fmt(reimb)), el('span', { class: 'net' }, el('i', {}, 'Net'), Object.entries(net).map(([c, n]) => fmtMoney(Math.round(n * 100) / 100, c)).join(' + ') || '—')));
   });
-  host.replaceChildren(
-    el('div', { class: 'section-head' }, el('h3', {}, 'Trips and per diem'), el('button', { onclick: () => openTripDialog(null) }, '+ Add trip')),
-    el('p', { class: 'help' }, 'A trip creates the per diem line (income) on its sheet. Personal lines linked to the trip count as out of pocket, business lines as reimbursed.'),
-    cards.length ? el('div', { class: 'trip-list' }, cards) : el('p', { class: 'empty' }, 'No trips yet.'));
+  let open = false;
+  try { open = localStorage.getItem('ifsbridge.tripsOpen') === 'open'; } catch {}
+  host.replaceChildren(el('details', { class: 'trips-fold', open, ontoggle: ev => { try { localStorage.setItem('ifsbridge.tripsOpen', ev.target.open ? 'open' : 'closed'); } catch {} } },
+    el('summary', {}, `Trips and per diem (${data.trips.length})`),
+    el('div', { class: 'row' }, el('button', { onclick: () => openTripDialog(null) }, '+ Add trip'), el('span', { class: 'help' }, 'A trip creates the per diem line on its sheet; its personal lines count as out of pocket, business lines as reimbursed.')),
+    cards.length ? el('div', { class: 'trip-list' }, cards) : el('p', { class: 'empty' }, 'No trips yet.')));
 }
 
 // ---------- dialogs ----------

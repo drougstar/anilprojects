@@ -126,7 +126,13 @@ details.more-opts .field:last-child{margin-bottom:6px}
 .week-strip .chip{font-size:12.5px;min-height:28px;padding:2px 9px}
 .week-chip.done{border-color:var(--ok);color:var(--ok)}
 .week-chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
-.week-state{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:12px 0 6px}
+.week-state{display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0}
+.week-actions{align-items:center}
+details.notes{margin:4px 0 10px} details.notes>summary{font-size:13.5px;font-weight:500;color:var(--ink-3)}
+.sum-line{grid-column:1 / -1;display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding-top:10px;border-top:1px solid var(--rule);font-size:14px}
+.sum-line code{font-size:13.5px}
+details.trips-fold>summary{font-size:16px;font-weight:600;color:var(--ink);cursor:pointer;padding:4px 0}
+details.trips-fold[open]>summary{margin-bottom:6px}
 .bulk-table td small{display:block}
 .copy-preview{list-style:none;padding:0;margin:8px 0;display:flex;flex-direction:column;gap:4px;font-size:14px}
 .copy-preview li{display:flex;gap:8px;align-items:baseline}

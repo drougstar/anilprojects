@@ -33,6 +33,7 @@ function showTab(name) {
   if (name === 'settings') renderSettings();
   if (name === 'expenses') { renderExpenses(); scheduleSync(500); }
   if (name === 'overview') renderOverview();
+  if (name === 'week' && !week && settings.clockify.apiKey) loadWeek();   // no need to press Load the first time
 }
 
 // ---------- week ----------
@@ -68,7 +69,7 @@ async function loadWeek() {
     week = buildWeek(entries, monday, settings, settings.mapping);
     exportText = week.canExport ? makeExport(week) : '';
     renderWeek();
-    status.textContent = `${entries.length} Clockify entries read for ${settings.clockify.userName || 'you'}.`;
+    status.textContent = '';
   } catch (e) {
     status.textContent = e.message;
   } finally { $('#btn-load').disabled = false; renderWeekStrip(); }
@@ -103,8 +104,9 @@ function renderWeek() {
   if (!week) return;
   const w = week;
 
-  // warnings
-  if (w.warnings.length) host.append(el('ul', { class: 'warnings' }, w.warnings.map(x => el('li', { class: x.level }, x.text))));
+  // problems stay visible; the notes on how hours were split fold away
+  const problems = w.warnings.filter(x => x.level !== 'info'), notes = w.warnings.filter(x => x.level === 'info');
+  if (problems.length) host.append(el('ul', { class: 'warnings' }, problems.map(x => el('li', { class: x.level }, x.text))));
 
   // table
   const head = el('tr', {}, el('th', {}, 'IFS activity'), el('th', {}, 'Code'), w.dates.map((d, i) => el('th', { class: 'num' }, el('span', {}, DAYS[i]), el('small', {}, d.slice(5)))), el('th', { class: 'num' }, 'Total'));
@@ -116,20 +118,15 @@ function renderWeek() {
   const foot = el('tr', { class: 'totals' }, el('td', { colspan: 2 }, 'Day total'), w.dayTotals.map(h => el('td', { class: 'num' }, fmtH(h))), el('td', { class: 'num total' }, fmtH(w.weekTotal)));
   host.append(el('div', { class: 'tbl' }, el('table', {}, el('thead', {}, head), el('tbody', {}, body.length ? body : el('tr', {}, el('td', { colspan: 10, class: 'empty' }, 'No hours for this week.'))), el('tfoot', {}, foot))));
 
-  // export
-  const actions = el('div', { class: 'actions' });
+  // one action row: copy, view, entered status
   const copyBtn = el('button', { class: 'primary', disabled: w.canExport ? null : 'disabled', onclick: copyExport }, 'Copy for IFS');
-  actions.append(copyBtn, el('span', { id: 'copy-status', class: 'muted' }, w.canExport ? `${w.rows.length} row${w.rows.length === 1 ? '' : 's'} ready. Paste into Proje Zaman Kaydı with right-click → Edit → Paste Object.` : 'Fix the errors above to enable export.'));
-  host.append(actions);
-  if (exportText) {
-    const det = el('details', {}, el('summary', {}, 'Show the IFS text'), el('pre', {}, exportText));
-    host.append(det);
-  }
-
-  // entered-in-IFS status of this week, with differences since the paste
-  const statusBox = el('div', { id: 'week-status-box' });
-  host.append(statusBox);
-  renderWeekStatus(w, statusBox);
+  const viewBtn = el('button', { class: 'link', disabled: exportText ? null : 'disabled', onclick: () => openDialog('IFS text', el('div', {}, el('p', { class: 'help' }, 'In IFS open Proje Zaman Kaydı for this week, right-click the grid → Edit → Paste Object, then save.'), el('pre', {}, exportText)), { wide: true }) }, 'view text');
+  const statusInline = el('span', { id: 'week-status-inline', class: 'week-state' });
+  host.append(el('div', { class: 'actions week-actions' }, copyBtn, viewBtn, statusInline, el('span', { id: 'copy-status', class: 'muted' }, w.canExport ? '' : 'Fix the problems above to enable the export.')));
+  const changesBox = el('div', { id: 'week-changes' });
+  host.append(changesBox);
+  if (notes.length) host.append(el('details', { class: 'notes' }, el('summary', {}, `${notes.length} note${notes.length === 1 ? '' : 's'} on how the hours were split`), el('ul', { class: 'warnings' }, notes.map(x => el('li', { class: 'info' }, x.text)))));
+  renderWeekStatus(w, statusInline, changesBox);
 
   // the Clockify entries behind the numbers, editable
   host.append(renderEntriesEditor(w));
@@ -138,23 +135,22 @@ function renderWeek() {
 // ---------- week status (entered in IFS) ----------
 const fmtWhen = iso => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 
-async function renderWeekStatus(w, box) {
+async function renderWeekStatus(w, inline, changesBox) {
   const rec = await weekRecord(w.mondayIso);
-  box.replaceChildren();
+  inline.replaceChildren();
+  changesBox.replaceChildren();
   if (!rec) {
-    box.append(el('div', { class: 'week-state' }, el('span', { class: 'pill norec' }, 'Not entered in IFS'),
-      el('button', { disabled: !w.canExport, onclick: () => markEntered(w) }, 'Mark week as entered in IFS'),
-      el('small', { class: 'help' }, 'Press it once the paste is saved in IFS. The rows are remembered, so a later change in Clockify is flagged here.')));
+    inline.append(el('span', { class: 'pill norec' }, 'Not in IFS yet'),
+      el('button', { disabled: !w.canExport, title: 'Press once the paste is saved in IFS; the rows are remembered so a later Clockify change is flagged', onclick: () => markEntered(w) }, 'Mark as entered'));
     return;
   }
   const changes = diffRows(rec.rows, w);
-  const undo = confirmButton('Undo', async () => { await unmarkWeek(w.mondayIso); toast('Week is no longer marked as entered'); renderWeek(); renderWeekStrip(); scheduleSync(); }, { armedLabel: 'Undo the mark? Tap again', className: 'link' });
-  box.append(el('div', { class: 'week-state' },
-    el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec') }, changes.length ? 'Changed since entered' : 'Entered in IFS'),
-    el('small', { class: 'muted' }, `entered ${fmtWhen(rec.enteredAt)} with ${rec.total} h`),
-    changes.length ? el('button', { onclick: () => markEntered(w) }, 'Mark as entered again') : null,
-    undo));
-  if (changes.length) box.append(el('ul', { class: 'warnings' }, el('li', { class: 'warn' }, 'Clockify differs from what was entered in IFS. Correct IFS (or Clockify), then mark the week again.'), changes.map(c => el('li', { class: 'info' }, c))));
+  const undo = confirmButton('undo', async () => { await unmarkWeek(w.mondayIso); toast('Week is no longer marked as entered'); renderWeek(); renderWeekStrip(); scheduleSync(); }, { armedLabel: 'undo? tap again', className: 'link' });
+  inline.append(...[
+    el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec'), title: `entered ${fmtWhen(rec.enteredAt)} with ${rec.total} h` }, changes.length ? 'Changed since entered' : `In IFS · ${fmtWhen(rec.enteredAt)}`),
+    changes.length ? el('button', { onclick: () => markEntered(w) }, 'Mark again') : null,
+    undo].filter(Boolean));
+  if (changes.length) changesBox.append(el('ul', { class: 'warnings' }, el('li', { class: 'warn' }, 'Clockify differs from what was entered in IFS. Correct IFS (or Clockify), then mark the week again.'), changes.map(c => el('li', { class: 'info' }, c))));
 }
 
 async function markEntered(w) {

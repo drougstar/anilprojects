@@ -110,9 +110,8 @@ async function renderHours(root, ym, allMonths) {
           card('Paid hours', `${pay.paidHours} h`, 'worked + day minimum + rest days'),
           card('Pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'type the hourly rate')),
         table(['Code', 'Description', 'Hours', '× rate', 'Amount'], pay.rows.map(r => [r.code, r.desc, String(r.hours), `× ${r.mult}`, s.payRate ? fmtMoney(r.amount, s.payCurrency) : '—'])),
-        el('h4', {}, 'By activity'),
-        table(['Activity', 'Hours'], Object.entries(rec.byActivity).sort().map(([a, h]) => [a, String(h)])),
-        el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify with the Week tab rules. Regular, travel and rest days ×1, overtime ×1.5 and ×2. Holidays come from Settings → Rules → Holidays.`));
+        el('details', { class: 'more-opts' }, el('summary', {}, 'By activity'), table(['Activity', 'Hours'], Object.entries(rec.byActivity).sort().map(([a, h]) => [a, String(h)]))),
+        el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify with the Week tab rules. Regular, travel, day minimum and rest days ×1, overtime ×1.5 and ×2.`));
     } else {
       if (!recs.length) { body.append(el('p', { class: 'muted' }, 'No month loaded yet. Pick a month above and press Load hours.')); return; }
       const rows = recs.sort((a, b) => b.month.localeCompare(a.month)).map(r => { const p = payFor(r, s); return [monthLabel(r.month), String(p.worked), String(r.byCode[s.codes.regular] || 0), String(Math.round(((r.byCode[s.codes.ot15] || 0) + (r.byCode[s.codes.ot2] || 0)) * 100) / 100), String(Math.round(((r.byCode[s.codes.travelRegular] || 0) + (r.byCode[s.codes.travel] || 0)) * 100) / 100), String(p.rest.hours), String(p.paidHours), s.payRate ? fmtMoney(p.amount, s.payCurrency) : '—']; });
@@ -122,7 +121,12 @@ async function renderHours(root, ym, allMonths) {
     }
   };
   const loadBtn = el('button', { class: 'primary', disabled: !ym, onclick: async () => { loadBtn.disabled = true; status.textContent = 'Loading from Clockify…'; try { await fetchMonthHours(ym); status.textContent = ''; await paint(); } catch (e) { status.textContent = e.message; } loadBtn.disabled = false; } }, ym ? 'Load hours' : 'Pick a month to load');
-  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), el('span', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), el('label', { class: 'inline' }, 'Day minimum', minDay, ' h'), el('label', { class: 'inline check' }, restOn, ' Sundays and holidays paid,', restH, ' h each'), loadBtn)), status, body);
+  let payOpen = false;
+  try { payOpen = localStorage.getItem('ifsbridge.payOpen') === 'open'; } catch {}
+  const paySettings = el('details', { class: 'more-opts', open: payOpen || !s.payRate, ontoggle: ev => { try { localStorage.setItem('ifsbridge.payOpen', ev.target.open ? 'open' : 'closed'); } catch {} } },
+    el('summary', {}, s.payRate ? `Pay settings · ${fmtMoney(s.payRate, s.payCurrency)} per hour, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'off' : (s.restDayHours ?? 7.5) + ' h'}` : 'Pay settings · type the hourly rate'),
+    el('div', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), el('label', { class: 'inline' }, 'Day minimum', minDay, ' h'), el('label', { class: 'inline check' }, restOn, ' Sundays and holidays paid,', restH, ' h each')));
+  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), loadBtn), paySettings, status, body);
   await paint();
 }
 
