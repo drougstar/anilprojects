@@ -69,16 +69,23 @@ async function syncReceipts(client, result, onStatus) {
 }
 
 // Quick check that the project is reachable and the tables exist (run after sign-in).
+// Returns 'ok', or a message. Only the core tables block the sync; a table added by a later
+// app version (weeks) just produces a hint and the rest still syncs.
+const CORE_TABLES = ['sheets', 'trips', 'expenses'];
 export async function checkSetup(client) {
   if (!client.configured) return 'Enter the project URL and anon key first.';
   if (!client.signedIn) return 'Sign in first.';
-  try {
-    for (const t of TABLES) await client.rest(`${t}?select=id&limit=1`);
-    return 'ok';
-  } catch (e) {
-    if (/42P01|does not exist|404/.test(e.message)) return 'Tables missing: run supabase/schema.sql in the SQL editor of your project, then try again.';
-    return e.message;
+  const missing = [];
+  for (const t of TABLES) {
+    try { await client.rest(`${t}?select=id&limit=1`); }
+    catch (e) {
+      if (/42P01|does not exist|404/.test(e.message)) missing.push(t);
+      else return e.message;
+    }
   }
+  if (missing.some(t => CORE_TABLES.includes(t))) return 'Tables missing: run supabase/schema.sql in the SQL editor of your project, then try again.';
+  if (missing.length) return `ok (table ${missing.join(', ')} not created yet: run supabase/schema.sql once more in the SQL editor so week status syncs too)`;
+  return 'ok';
 }
 
 // Why a photo could not be shown, by receipt id (for the placeholder in the dialog).

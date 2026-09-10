@@ -493,10 +493,12 @@ function renderSettings() {
   const runSync = async () => {
     const c = supabaseClient();
     const check = await checkSetup(c);
-    if (check !== 'ok') { sbStatus.textContent = check; return; }
+    if (!check.startsWith('ok')) { sbStatus.textContent = check; return; }
+    const hint = check === 'ok' ? '' : ' ' + check.slice(3).trim();
     sbStatus.textContent = 'Syncing…';
     const r = await sync(c, t => { if (t) sbStatus.textContent = t; });
-    sbStatus.textContent = r.errors?.length ? `Sync problem: ${r.errors[0]}` : `Synced as ${c.email}: ${r.pushed} sent, ${r.pulled} received${r.receipts ? `, ${r.receipts} photo${r.receipts === 1 ? '' : 's'} uploaded` : ''}.`;
+    const problems = (r.errors || []).filter(e => !/is missing in Supabase/.test(e));
+    sbStatus.textContent = problems.length ? `Sync problem: ${problems[0]}` : `Synced as ${c.email}: ${r.pushed} sent, ${r.pulled} received${r.receipts ? `, ${r.receipts} photo${r.receipts === 1 ? '' : 's'} uploaded` : ''}.${hint}`;
     if (r.pulled) renderExpenses();
   };
   const signIn = el('button', { class: 'primary', onclick: async () => { saveSettings(settings); try { await supabaseClient().signIn(email.value.trim(), pw.value); refreshSb(); await runSync(); } catch (e) { sbStatus.textContent = e.message; } } }, 'Sign in');
