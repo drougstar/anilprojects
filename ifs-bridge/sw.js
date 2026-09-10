@@ -1,6 +1,6 @@
 // Network-first for the app shell, cache as fallback so the page opens offline.
-const CACHE = 'ifsbridge-v20';
-const SHELL = ['./', './index.html', './css/app.css', './js/app.js', './js/rules.js', './js/ifs.js', './js/clockify.js', './js/store.js', './js/dom.js', './js/db.js', './js/supabase.js', './js/sync.js', './js/expense-ifs.js', './js/expenses.js', './js/localbackup.js', './manifest.webmanifest', './icons/icon-192.png'];
+const CACHE = 'ifsbridge-v21';
+const SHELL = ['./', './index.html', './css/app.css', './js/app.js', './js/rules.js', './js/ifs.js', './js/clockify.js', './js/store.js', './js/dom.js', './js/db.js', './js/supabase.js', './js/sync.js', './js/expense-ifs.js', './js/expenses.js', './js/localbackup.js', './js/week-status.js', './js/ocr.js', './js/report.js', './manifest.webmanifest', './icons/icon-192.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

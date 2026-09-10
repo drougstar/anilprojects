@@ -109,6 +109,30 @@ td.empty{text-align:center;padding:24px}
 .entry-project{font-weight:600}
 .entry small{flex-basis:100%;display:block}
 
+/* ---------- week status, bulk copy, copy day ---------- */
+.week-strip{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:-6px 0 14px}
+.week-chip.done{border-color:var(--ok);color:var(--ok)}
+.week-chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.week-state{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:12px 0 6px}
+.bulk-table td small{display:block}
+.copy-preview{list-style:none;padding:0;margin:8px 0;display:flex;flex-direction:column;gap:4px;font-size:14px}
+.copy-preview li{display:flex;gap:8px;align-items:baseline}
+.copy-preview b{font-family:"IBM Plex Mono",monospace;font-weight:500}
+
+/* ---------- receipt OCR suggestions ---------- */
+.ocr-box{background:var(--accent-soft);border-radius:8px;padding:8px 12px;font-size:14px;margin:-6px 0 12px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.ocr-box .k{color:var(--ink-3);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.ocr-box .chip{min-height:30px;padding:3px 11px;font-size:13.5px}
+
+/* ---------- overview ---------- */
+#tab-overview{max-width:900px;margin:0 auto}
+.ov-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:14px 0 6px}
+.ov-card{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:12px 14px}
+.ov-card .k{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.ov-card b{display:block;font-size:20px;font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;margin:2px 0}
+.ov-section{margin:18px 0}
+.ov-section h4{margin:0 0 8px;font-size:15px}
+
 /* ---------- settings ---------- */
 #tab-settings section{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:16px 18px;margin-bottom:16px}
 #tab-settings h4{margin:18px 0 6px}

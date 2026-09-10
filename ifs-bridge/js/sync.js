@@ -23,30 +23,13 @@ export async function sync(client, onStatus = () => {}) {
   try {
     for (const table of TABLES) {
       onStatus(`Syncing ${table}…`);
-      const local = await db.all(table);
-      const dirty = local.filter(r => r.dirty);
-      if (dirty.length) {
-        await client.upsert(table, dirty.map(r => toServer(r, client.userId)));
-        for (const r of dirty) await db.put(table, { ...r, dirty: false });
-        result.pushed += dirty.length;
+      try { await syncTable(client, table, result); }
+      catch (e) {
+        if (/42P01|does not exist|404/.test(e.message)) result.errors.push(`Table "${table}" is missing in Supabase: run supabase/schema.sql again in the SQL editor.`);
+        else throw e;
       }
-      const since = await db.meta(`lastSync.${table}`);
-      const remote = await client.pull(table, since);
-      let newest = since || '';
-      for (const raw of remote) {
-        const r = fromServer(raw);
-        const l = await db.get(table, r.id);
-        if (!l || l.updated_at < r.updated_at) { await db.put(table, r); result.pulled++; }
-        if (r.updated_at > newest) newest = r.updated_at;
-      }
-      if (newest) await db.setMeta(`lastSync.${table}`, newest);
     }
-    const receipts = await db.all('receipts');
-    for (const rc of receipts.filter(r => r.dirty && r.blob)) {
-      onStatus('Uploading receipt…');
-      try { await client.uploadReceipt(rc.id, rc.blob); await db.put('receipts', { ...rc, dirty: false }); result.receipts++; }
-      catch (e) { result.errors.push(e.message); }
-    }
+    await syncReceipts(client, result, onStatus);
     await db.setMeta('lastSyncAt', new Date().toISOString());
     onStatus('');
   } catch (e) {
@@ -54,6 +37,35 @@ export async function sync(client, onStatus = () => {}) {
     onStatus(e.message);
   } finally { running = false; }
   return result;
+}
+
+async function syncTable(client, table, result) {
+  const local = await db.all(table);
+  const dirty = local.filter(r => r.dirty);
+  if (dirty.length) {
+    await client.upsert(table, dirty.map(r => toServer(r, client.userId)));
+    for (const r of dirty) await db.put(table, { ...r, dirty: false });
+    result.pushed += dirty.length;
+  }
+  const since = await db.meta(`lastSync.${table}`);
+  const remote = await client.pull(table, since);
+  let newest = since || '';
+  for (const raw of remote) {
+    const r = fromServer(raw);
+    const l = await db.get(table, r.id);
+    if (!l || l.updated_at < r.updated_at) { await db.put(table, r); result.pulled++; }
+    if (r.updated_at > newest) newest = r.updated_at;
+  }
+  if (newest) await db.setMeta(`lastSync.${table}`, newest);
+}
+
+async function syncReceipts(client, result, onStatus) {
+  const receipts = await db.all('receipts');
+  for (const rc of receipts.filter(r => r.dirty && r.blob)) {
+    onStatus('Uploading receipt…');
+    try { await client.uploadReceipt(rc.id, rc.blob); await db.put('receipts', { ...rc, dirty: false }); result.receipts++; }
+    catch (e) { result.errors.push(e.message); }
+  }
 }
 
 // Quick check that the project is reachable and the tables exist (run after sign-in).

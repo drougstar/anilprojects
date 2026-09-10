@@ -6,6 +6,8 @@ import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, e
 import { el, $, confirmButton, toast, openDialog, field as dlgField } from './dom.js';
 import { initLocalBackup, backupAvailable, backupMeta, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
+import { allWeeks, weekRecord, markWeekEntered, diffRows, recentMondays, shiftIso } from './week-status.js';
+import { initReport, render as renderOverview } from './report.js';
 
 let settings = loadSettings();
 let week = null;          // result of buildWeek
@@ -30,6 +32,7 @@ function showTab(name) {
   try { localStorage.setItem('ifsbridge.tab', name); } catch {}
   if (name === 'settings') renderSettings();
   if (name === 'expenses') { renderExpenses(); scheduleSync(500); }
+  if (name === 'overview') renderOverview();
 }
 
 // ---------- week ----------
@@ -68,7 +71,7 @@ async function loadWeek() {
     status.textContent = `${entries.length} Clockify entries read for ${settings.clockify.userName || 'you'}.`;
   } catch (e) {
     status.textContent = e.message;
-  } finally { $('#btn-load').disabled = false; }
+  } finally { $('#btn-load').disabled = false; renderWeekStrip(); }
 }
 
 function makeExport(w) {
@@ -123,8 +126,147 @@ function renderWeek() {
     host.append(det);
   }
 
+  // entered-in-IFS status of this week, with differences since the paste
+  const statusBox = el('div', { id: 'week-status-box' });
+  host.append(statusBox);
+  renderWeekStatus(w, statusBox);
+
   // the Clockify entries behind the numbers, editable
   host.append(renderEntriesEditor(w));
+}
+
+// ---------- week status (entered in IFS) ----------
+const fmtWhen = iso => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+
+async function renderWeekStatus(w, box) {
+  const rec = await weekRecord(w.mondayIso);
+  box.replaceChildren();
+  if (!rec) {
+    box.append(el('div', { class: 'week-state' }, el('span', { class: 'pill norec' }, 'Not entered in IFS'),
+      el('button', { disabled: !w.canExport, onclick: () => markEntered(w) }, 'Mark week as entered in IFS'),
+      el('small', { class: 'help' }, 'Press it once the paste is saved in IFS. The rows are remembered, so a later change in Clockify is flagged here.')));
+    return;
+  }
+  const changes = diffRows(rec.rows, w);
+  box.append(el('div', { class: 'week-state' },
+    el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec') }, changes.length ? 'Changed since entered' : 'Entered in IFS'),
+    el('small', { class: 'muted' }, `entered ${fmtWhen(rec.enteredAt)} with ${rec.total} h`),
+    changes.length ? el('button', { onclick: () => markEntered(w) }, 'Mark as entered again') : null),
+    changes.length ? el('ul', { class: 'warnings' }, el('li', { class: 'warn' }, 'Clockify differs from what was entered in IFS. Correct IFS (or Clockify), then mark the week again.'), changes.map(c => el('li', { class: 'info' }, c))) : null);
+}
+
+async function markEntered(w) {
+  await markWeekEntered(w);
+  toast('Week marked as entered in IFS');
+  renderWeek();
+  renderWeekStrip();
+  scheduleSync();
+}
+
+async function renderWeekStrip() {
+  const host = $('#week-strip');
+  if (!host) return;
+  const byMonday = new Map((await allWeeks()).map(x => [x.monday, x]));
+  const current = mondayOf($('#week-monday').value || todayIso());
+  host.replaceChildren(el('span', { class: 'chips-label' }, 'Weeks'), ...recentMondays(mondayOf(todayIso()), 10).map(m => {
+    const rec = byMonday.get(m);
+    return el('button', { type: 'button', class: 'chip week-chip' + (m === current ? ' on' : '') + (rec ? ' done' : ''), title: rec ? `Entered ${fmtWhen(rec.enteredAt)}, ${rec.total} h` : 'Not entered in IFS yet', onclick: () => { $('#week-monday').value = m; loadWeek(); } },
+      `${rec ? '✓' : '○'} ${new Date(m + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}`);
+  }));
+}
+
+// ---------- bulk copy: several weeks in one IFS text ----------
+async function fetchWeek(monday) {
+  const c = new Clockify(settings.clockify.apiKey);
+  const win = fetchWindow(monday, settings.timeZone);
+  const entries = await c.entries(settings.clockify.workspaceId, settings.clockify.userId, win.start, win.end);
+  return buildWeek(entries, monday, settings, settings.mapping);
+}
+
+function openBulkDialog() {
+  if (!settings.clockify.apiKey) { toast('Add the Clockify API key in Settings first.'); showTab('settings'); return; }
+  const thisMonday = mondayOf(todayIso());
+  const from = el('input', { type: 'date', value: shiftIso(thisMonday, -28) });
+  const to = el('input', { type: 'date', value: shiftIso(thisMonday, -7) });
+  const list = el('div');
+  const status = el('span', { class: 'help status' });
+  let loaded = [];
+  const copyBtn = el('button', { class: 'primary', disabled: true, onclick: async () => {
+    const ok = loaded.filter(x => x.w.canExport);
+    const text = ok.map(x => makeExport(x.w)).join('\n\n');
+    try { await navigator.clipboard.writeText(text); toast(`Copied ${ok.length} week${ok.length === 1 ? '' : 's'}, ${ok.reduce((n, x) => n + x.w.rows.length, 0)} rows`); }
+    catch { status.textContent = 'Clipboard blocked; open the weeks one by one instead.'; }
+  } }, 'Copy all');
+  const markBtn = el('button', { disabled: true, onclick: async () => { let n = 0; for (const x of loaded) if (x.w.canExport) { await markWeekEntered(x.w); n++; } toast(`${n} week${n === 1 ? '' : 's'} marked as entered`); loadBtn.click(); renderWeekStrip(); scheduleSync(); } }, 'Mark all as entered');
+  const loadBtn = el('button', { onclick: async () => {
+    const a = mondayOf(from.value), b = mondayOf(to.value);
+    if (!from.value || !to.value || a > b) { status.textContent = 'Pick a from-week that is not after the to-week.'; return; }
+    const mondays = []; for (let m = a; m <= b; m = shiftIso(m, 7)) mondays.push(m);
+    if (mondays.length > 26) { status.textContent = 'Up to 26 weeks at a time.'; return; }
+    loadBtn.disabled = true; loaded = []; status.textContent = `Loading ${mondays.length} week${mondays.length === 1 ? '' : 's'}…`;
+    try {
+      for (const m of mondays) loaded.push({ monday: m, w: await fetchWeek(m), rec: await weekRecord(m) });
+    } catch (e) { status.textContent = e.message; loadBtn.disabled = false; return; }
+    list.replaceChildren(el('div', { class: 'tbl' }, el('table', { class: 'bulk-table' },
+      el('thead', {}, el('tr', {}, ['Week of', 'Hours', 'Rows', 'Problems', 'Status'].map(h => el('th', {}, h)))),
+      el('tbody', {}, loaded.map(x => {
+        const errors = x.w.warnings.filter(z => z.level === 'error');
+        const changes = x.rec ? diffRows(x.rec.rows, x.w) : [];
+        return el('tr', {}, el('td', {}, x.monday), el('td', { class: 'num' }, String(x.w.weekTotal)), el('td', { class: 'num' }, String(x.w.rows.length)),
+          el('td', {}, errors.length ? el('span', { class: 'warn-text' }, errors.map(z => z.text).join(' ')) : x.w.rows.length ? '—' : el('span', { class: 'muted' }, 'no hours')),
+          el('td', {}, x.rec ? el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec') }, changes.length ? 'changed since entered' : `entered ${fmtWhen(x.rec.enteredAt)}`) : el('span', { class: 'pill' }, 'not entered')));
+      })))));
+    const ok = loaded.filter(x => x.w.canExport);
+    copyBtn.disabled = markBtn.disabled = !ok.length;
+    status.textContent = ok.length ? `${ok.length} week${ok.length === 1 ? '' : 's'} ready, ${loaded.length - ok.length} skipped.` : 'Nothing to export in this range.';
+    loadBtn.disabled = false;
+  } }, 'Load weeks');
+  openDialog('Bulk copy weeks', el('div', { class: 'form' },
+    el('p', { class: 'help' }, 'Loads every week in the range from Clockify, builds the IFS rows and puts them all in one text. Each row carries its own week date, so one Paste Object in Proje Zaman Kaydı creates all of them. Weeks with a problem (unmapped project) are skipped.'),
+    el('div', { class: 'grid2' }, dlgField('From (week of)', from), dlgField('To (week of)', to)),
+    el('div', { class: 'actions' }, loadBtn, copyBtn, markBtn, status),
+    list), { wide: true });
+}
+
+// ---------- copy a day's Clockify entries to another day ----------
+function openCopyDayDialog(targetDay) {
+  const w = week;
+  if (!w) return;
+  const byDay = new Map(w.dates.map(d => [d, []]));
+  for (const e of weekEntries) { const d = entryLocalDay(e); if (byDay.has(d) && e.timeInterval.end) byDay.get(d).push(e); }
+  const sources = w.dates.filter(d => byDay.get(d).length && d !== targetDay);
+  if (!sources.length) { toast('No other day in this week has entries to copy.'); return; }
+  const defaultSrc = [...sources].reverse().find(d => d < targetDay) || sources[sources.length - 1];
+  const src = el('select', {}, sources.map(d => el('option', { value: d, selected: d === defaultSrc }, `${DAYS[w.dates.indexOf(d)]} ${d} · ${byDay.get(d).length} entr${byDay.get(d).length === 1 ? 'y' : 'ies'}, ${byDay.get(d).reduce((n, e) => n + entryHours(e), 0)} h`)));
+  const alsoEmpty = el('input', { type: 'checkbox' });
+  const preview = el('ul', { class: 'copy-preview' });
+  const status = el('span', { class: 'help status' });
+  const tz = settings.timeZone;
+  const shifted = (e, day) => {   // same local times on another day; keeps an overnight end on the following day
+    const s = utcToLocalInput(e.timeInterval.start, tz), en = utcToLocalInput(e.timeInterval.end, tz);
+    const endDay = en.slice(0, 10) > s.slice(0, 10) ? shiftIso(day, 1) : day;
+    return { start: localToUtc(`${day}T${s.slice(11)}`, tz), end: localToUtc(`${endDay}T${en.slice(11)}`, tz) };
+  };
+  const targets = () => { const t = [targetDay]; if (alsoEmpty.checked) for (const d of w.dates) if (d !== targetDay && !byDay.get(d).length && w.dates.indexOf(d) < 5 && d > src.value) t.push(d); return [...new Set(t)]; };
+  const paint = () => { preview.replaceChildren(...byDay.get(src.value).map(e => el('li', {}, el('b', {}, fmtRange(e)), el('span', {}, e.project?.name || '(no project)'), (e.tags || []).map(t => el('span', { class: 'tag' }, t.name)), el('small', {}, (e.description || '').split(/\r?\n/)[0]))), el('li', { class: 'muted' }, `→ ${targets().map(d => `${DAYS[w.dates.indexOf(d)]} ${d}`).join(', ')}`)); };
+  src.addEventListener('change', paint); alsoEmpty.addEventListener('change', paint); paint();
+  const go = el('button', { class: 'primary', onclick: async () => {
+    go.disabled = true; status.textContent = 'Creating in Clockify…';
+    const c = new Clockify(settings.clockify.apiKey);
+    let n = 0;
+    try {
+      for (const day of targets()) for (const e of byDay.get(src.value)) {
+        await c.createEntry(settings.clockify.workspaceId, { ...shifted(e, day), description: e.description || '', projectId: e.projectId || e.project?.id || null, tagIds: (e.tags || []).map(t => t.id), billable: !!e.billable });
+        n++;
+      }
+      d.close(); toast(`${n} entr${n === 1 ? 'y' : 'ies'} created in Clockify`); await loadWeek();
+    } catch (e) { status.textContent = e.message; go.disabled = false; }
+  } }, 'Create in Clockify');
+  const d = openDialog(`Copy entries to ${DAYS[w.dates.indexOf(targetDay)]} ${targetDay}`, el('div', { class: 'form' },
+    dlgField('Copy from', src, 'The entries of that day are created again with the same times, project, tags and description.'),
+    el('label', { class: 'inline check' }, alsoEmpty, ' Also fill the other empty weekdays after the source day'),
+    preview,
+    el('div', { class: 'actions' }, go, el('button', { onclick: () => d.close() }, 'Cancel'), status)));
 }
 
 // ---------- Clockify entries editor (writes back to Clockify) ----------
@@ -141,7 +283,7 @@ function renderEntriesEditor(w) {
   const days = w.dates.map((d, i) => {
     const es = byDay.get(d).sort((a, b) => a.timeInterval.start.localeCompare(b.timeInterval.start));
     return el('div', { class: 'day' },
-      el('div', { class: 'day-title' }, el('h4', {}, `${DAYS[i]} ${d}`), el('button', { class: 'link', onclick: () => openEntryDialog(null, d) }, '+ add')),
+      el('div', { class: 'day-title' }, el('h4', {}, `${DAYS[i]} ${d}`), el('span', {}, el('button', { class: 'link', onclick: () => openCopyDayDialog(d) }, 'copy from…'), el('button', { class: 'link', onclick: () => openEntryDialog(null, d) }, '+ add'))),
       es.length ? el('ul', {}, es.map(e => el('li', {}, el('button', { type: 'button', class: 'entry', onclick: () => openEntryDialog(e, d) },
         el('b', {}, `${entryHours(e)} h`), el('span', { class: 'entry-range' }, fmtRange(e)), el('span', { class: 'entry-project' }, e.project?.name || '(no project)'),
         (e.tags || []).map(t => el('span', { class: 'tag' }, t.name)),
@@ -445,6 +587,10 @@ function rebuildTemplate(rec) {
 // ---------- boot ----------
 function boot() {
   initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), el, $ });
+  initReport({ settings: () => settings });
+  $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
+  $('#btn-bulk').addEventListener('click', openBulkDialog);
+  if (settings.clockify.apiKey) renderWeekStrip();
   initLocalBackup({ onRestored: () => { settings = loadSettings(); const t = document.querySelector('.tabs button.active')?.dataset.tab || 'expenses'; showTab(t); } });
   for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
   $('#week-monday').value = mondayOf(shiftMonday(todayIso(), -7));

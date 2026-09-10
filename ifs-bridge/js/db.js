@@ -1,8 +1,8 @@
 // Local IndexedDB store: works offline, syncs to Supabase when signed in (sync.js).
 // Every row: { id, ..., updated_at (ISO), deleted (bool), dirty (bool, local only) }.
 const NAME = 'ifsbridge';
-const VERSION = 1;
-export const TABLES = ['sheets', 'trips', 'expenses'];
+const VERSION = 2;
+export const TABLES = ['sheets', 'trips', 'expenses', 'weeks'];   // weeks: timesheet weeks marked as entered in IFS
 let opening = null;
 
 function open() {

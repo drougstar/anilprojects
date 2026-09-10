@@ -8,6 +8,7 @@ import { buildExpenseExport, numberReceipts, referenceText, totalsByCurrency, fm
 import { parseCopyObjects } from './ifs.js';
 import { loadSettings, saveSettings } from './store.js';
 import { el, $, confirmButton, openDialog, toast, download, field } from './dom.js';
+import { readReceipt } from './ocr.js';
 
 let ctx = null;            // { settings(), saveSettings(s) }
 let client = null;
@@ -404,11 +405,28 @@ function openLineDialog(line, prefill = null) {
   const refLine = el('div', { class: 'ref-preview' });
   const dupBox = el('div', { class: 'dup-warn', hidden: true });
   const gallery = el('div', { class: 'gallery' });
+  const ocrBox = el('div', { class: 'ocr-box', hidden: true });
+  // Read amount, date and currency off a new photo and offer them; nothing is applied by itself.
+  async function readPhoto(blob) {
+    ocrBox.hidden = false;
+    ocrBox.replaceChildren(el('span', { class: 'k' }, 'Reading the photo…'), el('span', { class: 'muted' }, 'first time downloads the text reader, a few MB'));
+    try {
+      const r = await readReceipt(blob, { onProgress: p => { const s = ocrBox.querySelector('.muted'); if (s) s.textContent = `${p}%`; } });
+      const found = [];
+      if (r.amount) found.push(el('button', { type: 'button', class: 'chip', onclick: () => { amount.value = r.amount; if (r.currency) cur.value = r.currency; checkDup(); } }, `Amount ${r.amount}${r.currency ? ' ' + r.currency : ''}`));
+      if (r.date) found.push(el('button', { type: 'button', class: 'chip', onclick: () => { date.value = r.date; updateRef(); checkDup(); } }, `Date ${fmtDate(r.date)}`));
+      for (const v of r.candidates.filter(v => v !== r.amount).slice(0, 3)) found.push(el('button', { type: 'button', class: 'chip', onclick: () => { amount.value = v; checkDup(); } }, String(v)));
+      ocrBox.replaceChildren(el('span', { class: 'k' }, found.length ? 'From the photo, tap to use' : 'Nothing readable in the photo'), ...found, el('button', { type: 'button', class: 'link', onclick: () => { ocrBox.hidden = true; } }, 'hide'));
+      if (found.length && r.amount && r.date && !Number(amount.value)) { amount.value = r.amount; if (r.currency) cur.value = r.currency; date.value = r.date; updateRef(); checkDup(); ocrBox.querySelector('.k').textContent = 'Filled from the photo, check it'; }
+    } catch (e) { ocrBox.replaceChildren(el('span', { class: 'k' }, 'Could not read the photo'), el('span', { class: 'muted' }, e.message), el('button', { type: 'button', class: 'link', onclick: () => { ocrBox.hidden = true; } }, 'hide')); }
+  }
   const photoIn = el('input', { type: 'file', accept: 'image/*', capture: 'environment', multiple: true, hidden: true, onchange: async ev => {
-    for (const f of ev.target.files) photos.push({ id: uuid(), blob: await downscale(f), isNew: true });
+    const added = [];
+    for (const f of ev.target.files) { const p = { id: uuid(), blob: await downscale(f), isNew: true }; photos.push(p); added.push(p); }
     ev.target.value = '';
     paintGallery();
     if (!receipt && photos.length) { receipt = true; recChk.checked = true; updateRef(); }
+    if (added.length && (isNew || !Number(amount.value))) readPhoto(added[0].blob);
   } });
   const photoBtn = el('button', { type: 'button', onclick: () => photoIn.click() }, '📷 Add photo');
   const status = el('span', { class: 'help status' });
@@ -476,6 +494,7 @@ function openLineDialog(line, prefill = null) {
   const body = el('div', { class: 'form' },
     el('span', { class: 'lbl' }, 'Amount'),
     el('div', { class: 'amount-row' }, amount, cur),
+    ocrBox,
     dupBox,
     field('Date', el('div', {}, date, dateChips)),
     field('Type', code, 'The IFS expense type. The number is the IFS expense code.'),

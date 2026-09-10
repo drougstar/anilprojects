@@ -18,6 +18,7 @@
   <nav class="tabs">
     <button data-tab="week">Week</button>
     <button data-tab="expenses">Expenses</button>
+    <button data-tab="overview">Overview</button>
     <button data-tab="settings">Settings</button>
   </nav>
 </header>
@@ -29,12 +30,15 @@
       <label>Week of Monday <input type="date" id="week-monday"></label>
       <button id="btn-next" title="Next week">›</button>
       <button id="btn-load" class="primary">Load from Clockify</button>
+      <button id="btn-bulk" title="Several weeks in one IFS text">Bulk copy…</button>
       <span id="week-status" class="muted"></span>
     </div>
     <div id="week-result"></div>
   </section>
 
   <section id="tab-expenses" class="tab" hidden></section>
+
+  <section id="tab-overview" class="tab" hidden></section>
 
   <section id="tab-settings" class="tab" hidden></section>
 </main>
