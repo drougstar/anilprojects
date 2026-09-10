@@ -24,6 +24,13 @@ export async function markWeekEntered(w) {
   return save('weeks', { ...(cur || { created_at: new Date().toISOString() }), monday: w.mondayIso, enteredAt: new Date().toISOString(), rows: snapshotRows(w), total: Math.round(w.weekTotal * 100) / 100 });
 }
 
+// Undo a "marked as entered" (the record is soft-deleted and synced like any other row).
+export async function unmarkWeek(monday) {
+  const rec = await weekRecord(monday);
+  if (rec) await save('weeks', { ...rec, deleted: true });
+  return !!rec;
+}
+
 // Human-readable differences between what was entered and what Clockify gives now.
 export function diffRows(savedRows, w) {
   const cur = snapshotRows(w);

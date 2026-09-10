@@ -109,8 +109,21 @@ td.empty{text-align:center;padding:24px}
 .entry-project{font-weight:600}
 .entry small{flex-basis:100%;display:block}
 
+/* ---------- folds (settings sections, "more options") ---------- */
+details.set-fold>summary{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:16px;font-weight:600;color:var(--ink);padding:2px 0;list-style:none}
+details.set-fold>summary::-webkit-details-marker{display:none}
+details.set-fold>summary::before{content:"▸";display:inline-block;width:1em;color:var(--ink-3);margin-right:4px}
+details.set-fold[open]>summary::before{content:"▾"}
+details.set-fold>summary small{font-weight:400;color:var(--ink-3);margin-left:auto}
+details.set-fold[open]>summary{margin-bottom:12px}
+details.more-opts{margin:0 0 14px;border:1px dashed var(--rule);border-radius:8px;padding:6px 12px}
+details.more-opts>summary{font-size:14px;color:var(--ink-2);font-weight:500}
+details.more-opts[open]>summary{margin-bottom:10px}
+details.more-opts .field:last-child{margin-bottom:6px}
+
 /* ---------- week status, bulk copy, copy day ---------- */
 .week-strip{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:-6px 0 14px}
+.week-strip .chip{font-size:12.5px;min-height:28px;padding:2px 9px}
 .week-chip.done{border-color:var(--ok);color:var(--ok)}
 .week-chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .week-state{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:12px 0 6px}

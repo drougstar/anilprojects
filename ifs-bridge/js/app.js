@@ -6,7 +6,7 @@ import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, e
 import { el, $, confirmButton, toast, openDialog, field as dlgField } from './dom.js';
 import { initLocalBackup, backupAvailable, backupMeta, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
-import { allWeeks, weekRecord, markWeekEntered, diffRows, recentMondays, shiftIso } from './week-status.js';
+import { allWeeks, weekRecord, markWeekEntered, unmarkWeek, diffRows, recentMondays, shiftIso } from './week-status.js';
 import { initReport, render as renderOverview } from './report.js';
 
 let settings = loadSettings();
@@ -148,11 +148,13 @@ async function renderWeekStatus(w, box) {
     return;
   }
   const changes = diffRows(rec.rows, w);
+  const undo = confirmButton('Undo', async () => { await unmarkWeek(w.mondayIso); toast('Week is no longer marked as entered'); renderWeek(); renderWeekStrip(); scheduleSync(); }, { armedLabel: 'Undo the mark? Tap again', className: 'link' });
   box.append(el('div', { class: 'week-state' },
     el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec') }, changes.length ? 'Changed since entered' : 'Entered in IFS'),
     el('small', { class: 'muted' }, `entered ${fmtWhen(rec.enteredAt)} with ${rec.total} h`),
-    changes.length ? el('button', { onclick: () => markEntered(w) }, 'Mark as entered again') : null),
-    changes.length ? el('ul', { class: 'warnings' }, el('li', { class: 'warn' }, 'Clockify differs from what was entered in IFS. Correct IFS (or Clockify), then mark the week again.'), changes.map(c => el('li', { class: 'info' }, c))) : null);
+    changes.length ? el('button', { onclick: () => markEntered(w) }, 'Mark as entered again') : null,
+    undo));
+  if (changes.length) box.append(el('ul', { class: 'warnings' }, el('li', { class: 'warn' }, 'Clockify differs from what was entered in IFS. Correct IFS (or Clockify), then mark the week again.'), changes.map(c => el('li', { class: 'info' }, c))));
 }
 
 async function markEntered(w) {
@@ -289,7 +291,11 @@ function renderEntriesEditor(w) {
         (e.tags || []).map(t => el('span', { class: 'tag' }, t.name)),
         el('small', {}, (e.description || '').split(/\r?\n/)[0]))))) : el('p', { class: 'muted' }, 'No entries.'));
   });
-  return el('details', { class: 'detail', open: true }, el('summary', {}, `Clockify entries (${weekEntries.length}) — tap one to change it in Clockify`), el('div', { class: 'days' }, days));
+  let open = false;
+  try { open = localStorage.getItem('ifsbridge.weekEntriesOpen') === 'open'; } catch {}
+  const det = el('details', { class: 'detail', open, ontoggle: ev => { try { localStorage.setItem('ifsbridge.weekEntriesOpen', ev.target.open ? 'open' : 'closed'); } catch {} } },
+    el('summary', {}, `Clockify entries (${weekEntries.length}) · edit, add or copy a day`), el('div', { class: 'days' }, days));
+  return det;
 }
 
 async function clockifyMetaLoad() {
@@ -579,6 +585,22 @@ function renderSettings() {
   } }, 'Save settings');
   const resetBtn = confirmButton('Reset rules and mapping to defaults', () => { const keep = { clockify: settings.clockify, supabase: settings.supabase }; settings = { ...structuredClone(DEFAULTS), ...keep }; saveSettings(settings); renderSettings(); toast('Defaults restored. Keys kept.'); }, { armedLabel: 'Reset? Tap again to confirm', className: 'link' });
   root.append(el('div', { class: 'actions' }, saveBtn, resetBtn, el('span', { id: 'save-status', class: 'muted' })));
+  // Fold every section; the ones that still need attention start open, the rest remember your choice.
+  const c = supabaseClient();
+  const needs = { Clockify: !settings.clockify.apiKey, 'Sync between phone and PC (Supabase)': !c.configured || !c.signedIn };
+  const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Sync between phone and PC (Supabase)': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme() };
+  for (const sec of root.querySelectorAll('section')) {
+    const h3 = sec.querySelector('h3'); if (!h3) continue;
+    const title = h3.textContent;
+    const key = 'ifsbridge.settings.open.' + title.replace(/\W+/g, '_').slice(0, 30);
+    let saved = null; try { saved = localStorage.getItem(key); } catch {}
+    const open = saved ? saved === 'open' : !!needs[title];
+    const det = el('details', { class: 'set-fold', open }, el('summary', {}, el('span', {}, title), stateOf[title] ? el('small', {}, stateOf[title]) : null));
+    h3.remove();
+    while (sec.firstChild) det.append(sec.firstChild);
+    sec.append(det);
+    det.addEventListener('toggle', () => { try { localStorage.setItem(key, det.open ? 'open' : 'closed'); } catch {} });
+  }
   if (backupAvailable()) backupMeta().then(m => { const e = $('#pc-backup-state'); if (e) e.textContent = m?.savedAt ? `Last PC backup ${new Date(m.savedAt).toLocaleString()} (${Math.max(1, Math.round(m.bytes / 1024))} KB) in ${m.path}` : 'No PC backup yet.'; });
 }
 

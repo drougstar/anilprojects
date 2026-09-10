@@ -207,7 +207,7 @@ function paintSummary() {
   const partial = enteredCount > 0 && newCount > 0;
   const copyBtn = el('button', { class: 'primary', disabled: !!expAll.error || !(partial ? expNew.count : expAll.count), onclick: () => copy(partial ? expNew : expAll) }, partial ? `Copy new lines (${expNew.count})` : 'Copy for IFS');
   const copyAllBtn = partial ? el('button', { onclick: () => copy(expAll) }, `Copy all (${expAll.count})`) : null;
-  const viewBtn = el('button', { disabled: !expAll.count, onclick: () => openIfsTextDialog(partial ? expNew : expAll) }, 'View IFS text');
+  const viewBtn = el('button', { class: 'link', disabled: !expAll.count, onclick: () => openIfsTextDialog(partial ? expNew : expAll) }, 'view text');
   const enteredBtn = newCount > 0 ? el('button', { onclick: () => markEntered(sheet, lines) }, enteredCount ? `Mark new lines as entered (${newCount})` : 'Mark as entered in IFS') : null;
 
   // rates summary
@@ -228,7 +228,9 @@ function paintSummary() {
     [newCount === 0 || enteredCount === 0, 'New lines since the paste', enteredCount ? (newCount ? `${newCount} line${newCount === 1 ? '' : 's'} to export with “Copy new lines”` : 'none') : 'first export not done yet'],
   ];
   const allDone = items.every(i => i[0]) && sheet.status === 'entered';
-  const checklist = el('details', { class: 'close-box', open: !allDone && biz.length > 0 },
+  let closeOpen = false;
+  try { closeOpen = localStorage.getItem('ifsbridge.closeOpen') === 'open'; } catch {}
+  const checklist = el('details', { class: 'close-box', open: closeOpen, ontoggle: ev => { try { localStorage.setItem('ifsbridge.closeOpen', ev.target.open ? 'open' : 'closed'); } catch {} } },
     el('summary', {}, `Month close ${allDone ? '✓ complete' : `· ${items.filter(i => !i[0]).length} open`}`),
     el('ul', { class: 'checklist' }, items.map(([ok, label, note]) => el('li', {}, el('span', { class: 'mark ' + (ok ? 'ok' : 'todo') }, ok ? '✓' : '○'), el('span', {}, el('b', {}, label), ' ', el('small', {}, note))))));
 
@@ -503,10 +505,12 @@ function openLineDialog(line, prefill = null) {
     gallery,
     field('Written expense', el('div', {}, written, chipRow(recent('written', 8, [codeOf(e.code)?.short]), written)), 'Short text that goes to IFS inside the reference.'),
     field('Explanation', el('div', {}, vendor, chipRow(recent('vendor'), vendor)), 'Vendor or details for yourself. Stays in the app, never sent to IFS.'),
-    field('Cost object', el('div', {}, costObj, chipRow([...new Set([...s.costObjects, ...recent('costObject')])], costObj, { label: 'Choose' })), 'The “Person” column of the workbook (/Personal 1, /16 QP 16). Part of the IFS reference.'),
-    shortField,
-    data.trips.length ? field('Trip', trip, 'Link the line to a trip to compare it with the per diem.') : null,
-    isNew ? null : field('Sheet', sheetSel, 'Change it to move the line to another sheet.'),
+    el('details', { class: 'more-opts', open: !!(e.shortName || e.tripId || (e.costObject && e.costObject !== (s.costObjects[0] || ''))) },
+      el('summary', {}, 'More: cost object, project, trip' + (isNew ? '' : ', sheet')),
+      field('Cost object', el('div', {}, costObj, chipRow([...new Set([...s.costObjects, ...recent('costObject')])], costObj, { label: 'Choose' })), 'The “Person” column of the workbook (/Personal 1, /16 QP 16). Part of the IFS reference.'),
+      shortField,
+      data.trips.length ? field('Trip', trip, 'Link the line to a trip to compare it with the per diem.') : null,
+      isNew ? null : field('Sheet', sheetSel, 'Change it to move the line to another sheet.')),
     refLine,
     e.entered ? el('p', { class: 'help' }, `This line is marked as entered in IFS (${fmtWhen(e.enteredAt)}). Changes here do not change IFS.`) : null,
     el('div', { class: 'actions' },
@@ -606,12 +610,13 @@ function openSheetsDialog() {
     field('Current sheet', title),
     field('IFS Expense ID', expId, 'The number IFS gave the sheet. It goes into every exported row, so set it before Copy for IFS.'),
     field('Project short name', el('div', {}, shortIn, chipRow(shortNameSuggestions(), shortIn, { label: 'Choose' })), 'PROJECT.SUBPROJECT.ACTIVITY of the project’s expense activity, e.g. 210701.0105.0105-A. Written into every exported row so you no longer type it in IFS.'),
-    el('div', { class: 'field' }, el('span', { class: 'lbl' }, `Fallback currency rates (${home} per 1 unit)`), rateHost, el('div', { class: 'row' }, addCur), el('small', { class: 'help' }, rateHelp)),
     field('Status', statusSel, 'Open → Exported when you copy → Entered when it is saved in IFS.'),
+    el('details', { class: 'more-opts', open: Object.keys(sheet.rates || {}).length > 0 }, el('summary', {}, `Fallback currency rates (${home} per 1 unit)`),
+      rateHost, el('div', { class: 'row' }, addCur), el('small', { class: 'help' }, rateHelp)),
     el('div', { class: 'actions' }, saveBtn, el('button', { onclick: () => d.close() }, 'Cancel'), delBtn),
-    el('h4', {}, 'Import lines from IFS'),
-    el('p', { class: 'help' }, 'Brings rows that already exist in IFS into this sheet as business lines marked “In IFS”: date, type, written text, cost object, currency, amount and receipt order. Lines already here (same date, amount, currency and text) are skipped.'),
-    importArea, el('div', { class: 'row' }, importBtn, importStatus),
+    el('details', { class: 'more-opts' }, el('summary', {}, 'Import lines from IFS'),
+      el('p', { class: 'help' }, 'Brings rows that already exist in IFS into this sheet as business lines marked “In IFS”: date, type, written text, cost object, currency, amount and receipt order. Lines already here (same date, amount, currency and text) are skipped.'),
+      importArea, el('div', { class: 'row' }, importBtn, importStatus)),
     el('div', { class: 'section-head' }, el('h4', {}, 'Other sheets'), newBtn),
     others.length ? el('div', { class: 'sheet-list' }, others) : el('p', { class: 'empty' }, 'No other sheets.')), { wide: true });
 }
