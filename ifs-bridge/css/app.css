@@ -153,6 +153,10 @@ details.trips-fold[open]>summary{margin-bottom:6px}
 .ov-section .section-head{margin:0 0 6px}
 .rate-in{width:8em}
 .rate-in.short{width:5em}
+#tab-settings .field .row.tight{display:flex;gap:6px;width:100%}
+#tab-settings .field .row.tight input{width:auto;flex:1;min-width:0}
+#tab-settings .field .row.tight select{width:auto}
+#tab-settings .field .row input[type=number]{width:6em}
 .ov-section .cur{width:auto}
 .ov-section h4{margin:0 0 8px;font-size:15px}
 

@@ -80,13 +80,6 @@ async function renderHours(root, ym, allMonths) {
   const s = ctx.settings();
   const host = el('section', { class: 'ov-section' });
   root.append(host);
-  const rate = el('input', { type: 'number', step: '0.01', inputmode: 'decimal', value: s.payRate || '', placeholder: '0.00', class: 'rate-in' });
-  const cur = el('select', { class: 'cur' }, s.currencies.map(c => el('option', { value: c, selected: c === (s.payCurrency || 'TRY') }, c)));
-  const restOn = el('input', { type: 'checkbox', checked: s.restDaysPaid !== false });
-  const restH = el('input', { type: 'number', step: '0.5', inputmode: 'decimal', value: s.restDayHours ?? 7.5, class: 'rate-in short' });
-  const minDay = el('input', { type: 'number', step: '0.5', inputmode: 'decimal', value: s.payMinDay ?? 9, class: 'rate-in short' });
-  const saveRate = () => { s.payRate = Number(String(rate.value).replace(',', '.')) || 0; s.payCurrency = cur.value; s.restDaysPaid = restOn.checked; s.restDayHours = Number(String(restH.value).replace(',', '.')) || 0; s.payMinDay = Number(String(minDay.value).replace(',', '.')) || 0; ctx.saveSettings(s); paint(); };
-  for (const i of [rate, cur, restOn, restH, minDay]) i.addEventListener('change', saveRate);
   const body = el('div');
   const status = el('span', { class: 'help status' });
   const paint = async () => {
@@ -108,7 +101,7 @@ async function renderHours(root, ym, allMonths) {
           card('Day minimum', `${pay.topUp} h`, pay.needsReload ? 'press Load hours again to compute' : pay.topUp ? `${pay.topUpDays} day${pay.topUpDays === 1 ? '' : 's'} below ${s.payMinDay ?? 9} h topped up` : `every worked day has ${s.payMinDay ?? 9} h`),
           card('Rest days', `${pay.rest.hours} h`, pay.rest.hours ? `${pay.rest.sundays} Sunday${pay.rest.sundays === 1 ? '' : 's'}${pay.rest.holidays ? ` + ${pay.rest.holidays} holiday${pay.rest.holidays === 1 ? '' : 's'}` : ''} × ${pay.rest.perDay} h, paid` : 'not counted'),
           card('Paid hours', `${pay.paidHours} h`, 'worked + day minimum + rest days'),
-          card('Pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'type the hourly rate')),
+          card('Pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'set the rate in Settings')),
         table(['Code', 'Description', 'Hours', '× rate', 'Amount'], pay.rows.map(r => [r.code, r.desc, String(r.hours), `× ${r.mult}`, s.payRate ? fmtMoney(r.amount, s.payCurrency) : '—'])),
         el('details', { class: 'more-opts' }, el('summary', {}, 'By activity'), table(['Activity', 'Hours'], Object.entries(rec.byActivity).sort().map(([a, h]) => [a, String(h)]))),
         el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify with the Week tab rules. Regular, travel, day minimum and rest days ×1, overtime ×1.5 and ×2.`));
@@ -121,12 +114,9 @@ async function renderHours(root, ym, allMonths) {
     }
   };
   const loadBtn = el('button', { class: 'primary', disabled: !ym, onclick: async () => { loadBtn.disabled = true; status.textContent = 'Loading from Clockify…'; try { await fetchMonthHours(ym); status.textContent = ''; await paint(); } catch (e) { status.textContent = e.message; } loadBtn.disabled = false; } }, ym ? 'Load hours' : 'Pick a month to load');
-  let payOpen = false;
-  try { payOpen = localStorage.getItem('ifsbridge.payOpen') === 'open'; } catch {}
-  const paySettings = el('details', { class: 'more-opts', open: payOpen || !s.payRate, ontoggle: ev => { try { localStorage.setItem('ifsbridge.payOpen', ev.target.open ? 'open' : 'closed'); } catch {} } },
-    el('summary', {}, s.payRate ? `Pay settings · ${fmtMoney(s.payRate, s.payCurrency)} per hour, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'off' : (s.restDayHours ?? 7.5) + ' h'}` : 'Pay settings · type the hourly rate'),
-    el('div', { class: 'row' }, el('label', { class: 'inline' }, 'Hourly rate', rate, cur), el('label', { class: 'inline' }, 'Day minimum', minDay, ' h'), el('label', { class: 'inline check' }, restOn, ' Sundays and holidays paid,', restH, ' h each')));
-  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), loadBtn), paySettings, status, body);
+  host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), loadBtn),
+    el('small', { class: 'help' }, s.payRate ? `Pay estimate at ${fmtMoney(s.payRate, s.payCurrency)} per hour, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'not counted' : (s.restDayHours ?? 7.5) + ' h each'} (Settings → Pay estimate).` : 'For a pay estimate, set the hourly rate under Settings → Pay estimate.'),
+    status, body);
   await paint();
 }
 

@@ -372,6 +372,19 @@ function renderSettings() {
   const themeBtns = ['auto', 'light', 'dark'].map(m => el('button', { class: 'chip' + (currentTheme() === m ? ' on' : ''), onclick: e => { applyTheme(m); for (const b of themeBtns) b.classList.toggle('on', b === e.currentTarget); } }, m === 'auto' ? 'Follow system' : m === 'light' ? 'Light' : 'Dark'));
   root.append(el('section', {}, el('h3', {}, 'Appearance'), el('div', { class: 'theme-pick' }, themeBtns), el('small', { class: 'help' }, 'Applies on this device only.')));
 
+  // Pay estimate (used by the Overview tab)
+  const payRate = txt(s.payRate || '', { type: 'number', step: '0.01', inputmode: 'decimal', placeholder: '0.00', oninput: e => { s.payRate = Number(String(e.target.value).replace(',', '.')) || 0; } });
+  const payCur = el('select', { onchange: e => { s.payCurrency = e.target.value; } }, s.currencies.map(c => el('option', { value: c, selected: c === (s.payCurrency || 'TRY') ? 'selected' : null }, c)));
+  const payMin = txt(s.payMinDay ?? 9, { type: 'number', step: '0.5', inputmode: 'decimal', oninput: e => { s.payMinDay = Number(String(e.target.value).replace(',', '.')) || 0; } });
+  const restH = txt(s.restDayHours ?? 7.5, { type: 'number', step: '0.5', inputmode: 'decimal', oninput: e => { s.restDayHours = Number(String(e.target.value).replace(',', '.')) || 0; } });
+  const restOn = el('input', { type: 'checkbox', checked: s.restDaysPaid !== false ? 'checked' : null, onchange: e => { s.restDaysPaid = e.target.checked; } });
+  root.append(el('section', {}, el('h3', {}, 'Pay estimate'),
+    el('div', { class: 'grid3' },
+      field('Hourly rate', el('div', { class: 'row tight' }, payRate, payCur), 'Gross rate per hour. Only used for the estimate on the Overview tab.'),
+      field('Day minimum (h)', payMin, 'A worked weekday counts as at least this many regular hours; an 8 h day on a US project gets 1 h added.'),
+      el('label', { class: 'field' }, el('span', {}, 'Paid rest days'), el('span', { class: 'row' }, restOn, 'Sundays and holidays count, at', restH, 'h each'), el('small', {}, '45 h over 6 days gives 7.5 h. Holidays come from Rules → Holidays.'))),
+    el('small', { class: 'help' }, 'Multipliers: regular, travel, day minimum and rest days ×1; overtime ×1.5 and ×2.')));
+
   // Clockify
   const key = txt(s.clockify.apiKey, { type: 'password', autocomplete: 'off', spellcheck: 'false', id: 'set-key' });
   const testBtn = el('button', { onclick: async () => {
@@ -584,7 +597,7 @@ function renderSettings() {
   // Fold every section; the ones that still need attention start open, the rest remember your choice.
   const c = supabaseClient();
   const needs = { Clockify: !settings.clockify.apiKey, 'Sync between phone and PC (Supabase)': !c.configured || !c.signedIn };
-  const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Sync between phone and PC (Supabase)': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme() };
+  const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Sync between phone and PC (Supabase)': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
   for (const sec of root.querySelectorAll('section')) {
     const h3 = sec.querySelector('h3'); if (!h3) continue;
     const title = h3.textContent;
