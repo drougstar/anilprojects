@@ -126,10 +126,10 @@ export function timeCodeOf(entry, settings, rules = effectiveTimeCodeMappings(se
     // A recreated tag is a different tag even if its display name is reused.
     // Name matching is only the compatibility path for ID-less imported data.
     const matches = rules.filter(rule => rule && (rule.tagId && tag.id ? rule.tagId === tag.id : rule.tagName && rule.tagName === tag.name));
-    if (!matches.length) return { error: `Clockify tag "${tag.name || tag.id || 'unknown'}" needs review. In Settings → Time calculation and tags, choose an IFS code or Label only and confirm it.` };
+    if (!matches.length) return { error: `Clockify tag "${tag.name || tag.id || 'unknown'}" needs review. In Settings → Timesheets → Clockify tags & IFS time codes, choose an IFS code or Label only and confirm it.` };
     if (matches.length !== 1) return { error: `Clockify tag "${tag.name || tag.id}" has conflicting mappings. Keep one confirmed mapping in Settings.` };
     const rule = matches[0];
-    if (rule.tagId && tag.id && rule.tagId === tag.id && rule.tagName && tag.name && rule.tagName !== tag.name) return { error: `Clockify tag "${rule.tagName}" was renamed to "${tag.name}". Read Clockify tags in Settings → Time calculation and tags, then review and confirm its meaning again.` };
+    if (rule.tagId && tag.id && rule.tagId === tag.id && rule.tagName && tag.name && rule.tagName !== tag.name) return { error: `Clockify tag "${rule.tagName}" was renamed to "${tag.name}". Read Clockify tags in Settings → Timesheets → Clockify tags & IFS time codes, then review and confirm its meaning again.` };
     if (!rule.confirmed || !['code', 'label'].includes(rule.mode)) return { error: `Clockify tag "${tag.name || tag.id}" has not been confirmed. Review its time-code mapping in Settings.` };
     if (rule.mode === 'label') continue;
     if (!timeCodeInfo(rule.code)) return { error: `Clockify tag "${tag.name || tag.id}" needs a supported IFS report code before exporting. Review its mapping in Settings.` };

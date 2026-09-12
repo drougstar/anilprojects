@@ -487,7 +487,7 @@ async function openEntryDialog(entry, dayIso) {
   const d = openDialog(isNew ? 'New Clockify entry' : 'Edit Clockify entry', el('div', { class: 'form' },
     dlgField('Project', project, 'The Clockify project. The mapping in Settings turns it into the IFS activity.'),
     el('div', { class: 'grid3' }, dlgField('Date', date, `Local, ${tz}.`), dlgField('Start', start, '24-hour, e.g. 08:30'), dlgField('End', end, hours)),
-    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Time. Leave and holiday codes use General.')),
+    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Timesheets. Leave and holiday codes use General.')),
     dlgField('Description', desc, 'Free text. A line “Short Name: 210701.010101.010101-B” sends the entry to that IFS activity.'),
     el('div', { class: 'actions' }, saveBtn, el('button', { onclick: () => d.close() }, 'Cancel'),
       isNew ? null : confirmButton('Delete in Clockify', async () => { try { await c.deleteEntry(ws, entry.id); d.close(); toast('Deleted in Clockify'); await loadWeek(); } catch (e) { status.textContent = e.message; } }),

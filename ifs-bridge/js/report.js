@@ -183,8 +183,8 @@ async function renderHours(root, ym, allMonths) {
     }
   };
   const loadBtn = el('button', { class: 'primary', disabled: !ym, onclick: async () => { loadBtn.disabled = true; status.textContent = 'Loading from Clockify…'; try { await fetchMonthHours(ym); status.textContent = ''; await paint(); } catch (e) { status.textContent = e.message; } loadBtn.disabled = false; } }, ym ? 'Load hours' : 'Pick a month to load');
-  const payHelp = s.payRate ? `Pay estimate at ${fmtMoney(s.payRate, s.payCurrency)} per hour${tagMode ? ', using recorded hours only.' : `, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'not counted' : (s.restDayHours ?? 7.5) + ' h each'} (Settings → Pay estimate).`}` :
-    'For a pay estimate, set the hourly rate under Settings → Pay estimate.';
+  const payHelp = s.payRate ? `Pay estimate at ${fmtMoney(s.payRate, s.payCurrency)} per hour${tagMode ? ', using recorded hours only.' : `, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'not counted' : (s.restDayHours ?? 7.5) + ' h each'} (Settings → Pay).`}` :
+    'For a pay estimate, set the hourly rate under Settings → Pay.';
   host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), loadBtn), el('small', { class: 'help' }, payHelp), status, body);
   await paint();
 }
