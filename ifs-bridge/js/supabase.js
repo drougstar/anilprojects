@@ -1,5 +1,5 @@
 // Small fetch client. Every data request belongs to the page's frozen scope.
-import { currentScope, assertScopeCurrent, assertScopeIdentityCurrent, sessionKeyFor, savedSessionFor, sessionExpiresAt, rotateSessionGeneration, notifySessionChanged, lockScope, visitRevision, assertVisitRevision, admitFreshSignIn } from './scope.js';
+import { currentScope, assertScopeCurrent, assertScopeIdentityCurrent, sessionKeyFor, savedSessionFor, sessionExpiresAt, rotateSessionGeneration, notifySessionChanged, lockScope, visitRevision, assertVisitRevision, admitFreshSignIn, sessionAssurance } from './scope.js';
 const SCOPED_TABLES = ['sheets', 'trips', 'expenses', 'weeks', 'templates', 'budgets', 'inbox'];
 const refreshing = new Map();
 export class Supabase {
@@ -48,7 +48,7 @@ export class Supabase {
     try { this.saveSession(null); }
     finally { lockScope(); notifySessionChanged(); }
   }
-  async ensureToken() {
+  async ensureToken({ identityOnly = false } = {}) {
     // Refresh validates identity only: an expired access token must be renewable
     // before any private database or API request is allowed to run.
     this.assertIdentity();
@@ -79,8 +79,75 @@ export class Supabase {
     }
     await refreshing.get(this.url);
     this.session = savedSessionFor(this.url);
-    this.assertScope();
+    identityOnly ? this.assertIdentity() : this.assertScope();
     return this.session.access_token;
+  }
+  // MFA is available after password sign-in even while Personal records are locked.
+  // These calls check identity and visit lifetime without granting record access.
+  async mfaRequest(path, { method = 'POST', body } = {}) {
+    const revision = visitRevision();
+    this.assertIdentity();
+    const token = await this.ensureToken({ identityOnly: true });
+    assertVisitRevision(revision); this.assertIdentity();
+    const res = await fetch(this.url + '/auth/v1/' + path, {
+      method, headers: { apikey: this.anonKey, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+    const data = await res.json().catch(() => ({}));
+    assertVisitRevision(revision); this.assertIdentity();
+    if (!res.ok) {
+      const error = Error(data.msg || data.error_description || data.error || 'Authenticator request failed (' + res.status + ')');
+      error.authStatus = res.status;
+      throw error;
+    }
+    return data;
+  }
+  async mfaPolicyReady() {
+    const revision = visitRevision();
+    this.assertIdentity();
+    const token = await this.ensureToken({ identityOnly: true });
+    assertVisitRevision(revision); this.assertIdentity();
+    const res = await fetch(this.url + '/rest/v1/rpc/ifsbridge_schema_version', {
+      method: 'POST', headers: { apikey: this.anonKey, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}'
+    });
+    const data = await res.json().catch(() => null);
+    assertVisitRevision(revision); this.assertIdentity();
+    if (!res.ok) throw Error('Could not check Personal security setup. Try again when connected.');
+    return Number(data) >= 3;
+  }
+  async listFactors() {
+    // Supabase's client lists factors from its authenticated user endpoint.
+    const user = await this.mfaRequest('user', { method: 'GET' });
+    if (user.id !== this.scope.userId) throw Error('The account changed. Sign in again.');
+    const all = Array.isArray(user.factors) ? user.factors : [];
+    return { all, totp: all.filter(factor => factor.factor_type === 'totp' && factor.status === 'verified') };
+  }
+  async enrollTotp() {
+    const result = await this.mfaRequest('factors', { body: {
+      factor_type: 'totp', friendly_name: 'Personal authenticator ' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7), issuer: 'Pocket / IFS Bridge'
+    } });
+    if (!result.id || result.type !== 'totp' || !result.totp?.secret || !result.totp?.qr_code)
+      throw Error('The authenticator setup response was incomplete. Try again.');
+    return result;
+  }
+  async challengeAndVerifyTotp(factorId, code) {
+    const id = String(factorId || '').trim(), digits = String(code || '').trim();
+    if (!/^[a-zA-Z0-9-]{1,128}$/.test(id)) throw Error('Choose an authenticator first.');
+    if (!/^\d{6}$/.test(digits)) throw Error('Enter the six-digit code from your authenticator.');
+    const revision = visitRevision();
+    const path = 'factors/' + encodeURIComponent(id);
+    const challenge = await this.mfaRequest(path + '/challenge', { body: {} });
+    if (!challenge.id || typeof challenge.id !== 'string') throw Error('The authenticator challenge was incomplete. Try again.');
+    assertVisitRevision(revision); this.assertIdentity();
+    const result = await this.mfaRequest(path + '/verify', { body: { challenge_id: challenge.id, code: digits } });
+    assertVisitRevision(revision); this.assertIdentity();
+    const lifetime = Number(result.expires_in);
+    if (sessionAssurance(result) !== 'aal2' || result.user?.id !== this.scope.userId ||
+        !result.refresh_token || !Number.isFinite(lifetime) || lifetime <= 0)
+      throw Error('The authenticator could not verify this account. Sign in again.');
+    // This upgrades the same account's session, keeping its workspace generation.
+    this.saveSession({ ...result, expires_at: Date.now() + lifetime * 1000 });
+    return this.session;
   }
   async headers(extra = {}) {
     const token = await this.ensureToken();

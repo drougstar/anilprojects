@@ -49,6 +49,16 @@ export function sessionExpiresAt(session) {
   if (Number.isFinite(expiry) && expiry > 0) return expiry < 1e12 ? expiry * 1000 : expiry;
   return 0;
 }
+// The API and database verify the token signature. This local claim only decides
+// whether this page may open its own cached Personal records.
+export function sessionAssurance(session) {
+  try {
+    const encoded = String(session?.access_token || '').split('.')[1];
+    if (!encoded) return 'aal1';
+    const claims = JSON.parse(globalThis.atob(encoded.replace(/-/g, '+').replace(/_/g, '/')));
+    return claims.aal === 'aal2' && claims.sub === session?.user?.id ? 'aal2' : 'aal1';
+  } catch { return 'aal1'; }
+}
 
 function storedSessionFor(url) {
   const key = sessionKeyFor(url), direct = read(key);
@@ -155,11 +165,15 @@ export function assertScopeIdentityCurrent() {
   if (!scopeIdentityIsCurrent()) throw Error('Account or workspace changed. Reload this tab before continuing.');
 }
 export function scopeIsCurrent() {
-  return !!SCOPE.userId && scopeIdentityIsCurrent() && sessionExpiresAt(savedSessionFor(SCOPE.backend)) > Date.now();
+  const session = savedSessionFor(SCOPE.backend);
+  return !!SCOPE.userId && scopeIdentityIsCurrent() && sessionExpiresAt(session) > Date.now() &&
+    (SCOPE.workspace !== 'personal' || sessionAssurance(session) === 'aal2');
 }
 export function assertScopeCurrent() {
   if (!SCOPE.userId) throw Error('Sign in to open your records. Your local records are still saved.');
   assertScopeIdentityCurrent();
+  if (SCOPE.workspace === 'personal' && sessionExpiresAt(savedSessionFor(SCOPE.backend)) > Date.now() && sessionAssurance(savedSessionFor(SCOPE.backend)) !== 'aal2')
+    throw Error('Verify your authenticator to open Personal records.');
   if (!scopeIsCurrent()) throw Error('Sign in to open your records. Your local records are still saved.');
 }
 export function lockScope() {
@@ -172,4 +186,11 @@ export function selectWorkspace(value) {
   if (!['work', 'personal'].includes(value)) throw Error('Choose Work or Personal.');
   assertScopeCurrent();
   put(`ifsbridge.workspace.${SCOPE.accountKey}`, value);
+}
+// A password-authenticated user may leave the Personal challenge for Work.
+// This changes the next page's selection without admitting Personal data.
+export function returnToWork() {
+  assertScopeIdentityCurrent();
+  if (!SCOPE.userId || sessionExpiresAt(savedSessionFor(SCOPE.backend)) <= Date.now()) throw Error('Sign in again to continue.');
+  put(`ifsbridge.workspace.${SCOPE.accountKey}`, 'work');
 }

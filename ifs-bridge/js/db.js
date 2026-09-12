@@ -99,9 +99,21 @@ export const db = {
 const changed = (store, id) => { assertScopeCurrent(); document.dispatchEvent(new CustomEvent('ifsbridge:changed', { detail: { store, id, scope: SCOPE.key } })); };
 const stamp = prior => new Date(Math.max(Date.now(), (Date.parse(prior?.updated_at) || 0) + 1)).toISOString();
 
+function assertUniqueWorkLinks(existing, replacements) {
+  const projected = new Map(existing.map(row => [row.id, row]));
+  for (const row of replacements) projected.set(row.id, row);
+  const linked = new Set();
+  for (const row of projected.values()) {
+    const id = !row.deleted && row.workExpenseLink?.expenseId;
+    if (!id) continue;
+    if (linked.has(id)) throw Error('A Work expense is already linked to another card transaction. Refresh and review the matches.');
+    linked.add(id);
+  }
+}
+
 // Splits, imports and recurring entries commit together, with one undo step.
 // Preconditions are checked in that same transaction, before any record changes.
-export async function atomicBatchSave(items, { label = 'Edit records' } = {}) {
+export async function atomicBatchSave(items, { label = 'Edit records', uniqueWorkExpenseLinks = false } = {}) {
   if (!items.length) return [];
   const seen = new Set();
   const changes = items.map(item => {
@@ -110,26 +122,41 @@ export async function atomicBatchSave(items, { label = 'Edit records' } = {}) {
     if (seen.has(key)) throw Error('The same record appears twice in this change.');
     seen.add(key); return { ...item, record };
   });
+  // Splits, templates and other editors must respect links too, even when they
+  // did not originate in the card-review tool.
+  uniqueWorkExpenseLinks ||= changes.some(item => item.table === 'expenses' && item.record.workExpenseLink?.expenseId);
   const d = await open(); assertScopeCurrent();
   const saved = await new Promise((resolve, reject) => {
-    const t = d.transaction([...new Set(changes.map(c => c.table)), 'history'], 'readwrite');
-    const before = [], output = [], audit = []; let left = changes.length;
+    const t = d.transaction([...new Set([...changes.map(c => c.table), ...(uniqueWorkExpenseLinks ? ['expenses'] : [])]), 'history'], 'readwrite');
+    const before = [], output = [], audit = []; let left = changes.length + (uniqueWorkExpenseLinks ? 1 : 0), existingExpenses = [];
     const guarded = guardTransaction(t, resolve, reject, () => output);
-    changes.forEach((c, i) => {
-      const req = t.objectStore(c.table).get(c.record.id);
-      req.onsuccess = () => guarded(() => {
-        before[i] = req.result || null; if (--left) return;
+    const commit = () => {
+        if (--left) return;
         changes.forEach((item, j) => {
           const prior = before[j];
           if ('expectedUpdatedAt' in item && (item.expectedUpdatedAt === null ? !!prior : prior?.updated_at !== item.expectedUpdatedAt)) throw Error('A record changed in another tab. Refresh and review it before trying again.');
           if (item.expectedRecord && !sameVersion(prior, item.expectedRecord)) throw Error('A record changed. Refresh and review it before trying again.');
         });
+        if (uniqueWorkExpenseLinks) {
+          // Check the final state inside the write transaction. A second review
+          // in another tab cannot claim the same Work expense concurrently.
+          assertUniqueWorkLinks(existingExpenses, changes.filter(item => item.table === 'expenses').map(item => item.record));
+        }
         changes.forEach((item, j) => {
           const prior = before[j];
           const full = { ...item.record, updated_at: stamp(prior), dirty: true, deleted: !!item.record.deleted, ...(prior?._remoteRevision == null ? {} : { _remoteRevision: prior._remoteRevision }) };
           t.objectStore(item.table).put(full); output.push(full); audit.push({ table: item.table, id: full.id, before: prior, after: full });
         });
         t.objectStore('history').put({ id: uuid(), at: now(), label, scope: SCOPE.key, changes: audit });
+    };
+    if (uniqueWorkExpenseLinks) {
+      const req = t.objectStore('expenses').getAll();
+      req.onsuccess = () => guarded(() => { existingExpenses = req.result; commit(); });
+    }
+    changes.forEach((c, i) => {
+      const req = t.objectStore(c.table).get(c.record.id);
+      req.onsuccess = () => guarded(() => {
+        before[i] = req.result || null; commit();
       });
     });
   });
@@ -148,13 +175,13 @@ export async function undoChange(id) {
   const d = await open(); assertScopeCurrent();
   await new Promise((resolve, reject) => {
     const t = d.transaction([...new Set(entry.changes.map(c => c.table)), 'history'], 'readwrite');
-    let left = entry.changes.length; const current = [], undo = [];
+    const checkLinks = entry.changes.some(c => c.table === 'expenses' && (c.before?.workExpenseLink?.expenseId || c.after?.workExpenseLink?.expenseId));
+    let left = entry.changes.length + (checkLinks ? 1 : 0), existingExpenses = []; const current = [], undo = [];
     const guarded = guardTransaction(t, resolve, reject);
-    entry.changes.forEach((c, i) => {
-      const req = t.objectStore(c.table).get(c.id);
-      req.onsuccess = () => guarded(() => {
-        current[i] = req.result; if (--left) return;
+    const commit = () => {
+        if (--left) return;
         entry.changes.forEach((change, j) => { if (!sameVersion(current[j], change.after)) throw Error('This record has newer edits. Undo those changes first.'); });
+        if (checkLinks) assertUniqueWorkLinks(existingExpenses, entry.changes.filter(c => c.table === 'expenses').map(c => c.before || { id: c.id, deleted: true }));
         entry.changes.forEach((change, j) => {
           const before = current[j];
           const restored = { ...(change.before || before), id: change.id, deleted: change.before ? !!change.before.deleted : true, dirty: true, updated_at: stamp(before), _remoteRevision: before?._remoteRevision };
@@ -162,6 +189,15 @@ export async function undoChange(id) {
         });
         t.objectStore('history').put({ ...entry, undoneAt: now() });
         t.objectStore('history').put({ id: uuid(), at: now(), label: 'Undo: ' + entry.label, scope: SCOPE.key, changes: undo });
+    };
+    if (checkLinks) {
+      const read = t.objectStore('expenses').getAll();
+      read.onsuccess = () => guarded(() => { existingExpenses = read.result; commit(); });
+    }
+    entry.changes.forEach((c, i) => {
+      const req = t.objectStore(c.table).get(c.id);
+      req.onsuccess = () => guarded(() => {
+        current[i] = req.result; commit();
       });
     });
   });

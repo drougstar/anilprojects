@@ -3,12 +3,27 @@
 import { save, live } from './db.js';
 
 export function snapshotRows(w) {
-  return w.rows.map(r => ({
+  return combineRows(w.rows.map(r => ({
     shortName: r.mapping.shortName || r.mapping.clockifyProjectName || '',
     code: r.code,
     hours: r.hours.map(h => Math.round(h * 100) / 100),
     total: Math.round(r.total * 100) / 100,
-  })).sort((a, b) => `${a.shortName}|${a.code}`.localeCompare(`${b.shortName}|${b.code}`));
+  })));
+}
+
+// The review can separate pay meanings for one IFS code; the pasted row and its
+// comparison snapshot must sum all of those contributions, not keep only one.
+function combineRows(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = `${row.shortName}|${row.code}`, prior = grouped.get(key);
+    if (!prior) grouped.set(key, { ...row, hours: [...row.hours] });
+    else {
+      prior.hours = prior.hours.map((hours, day) => Math.round((hours + row.hours[day]) * 100) / 100);
+      prior.total = Math.round((prior.total + row.total) * 100) / 100;
+    }
+  }
+  return [...grouped.values()].sort((a, b) => `${a.shortName}|${a.code}`.localeCompare(`${b.shortName}|${b.code}`));
 }
 
 export async function allWeeks() {
@@ -35,7 +50,7 @@ export async function unmarkWeek(monday) {
 export function diffRows(savedRows, w) {
   const cur = snapshotRows(w);
   const key = r => `${r.shortName}|${r.code}`;
-  const was = new Map((savedRows || []).map(r => [key(r), r]));
+  const was = new Map(combineRows(savedRows || []).map(r => [key(r), r]));
   const now = new Map(cur.map(r => [key(r), r]));
   const out = [];
   for (const [k, r] of now) {

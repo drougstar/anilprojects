@@ -1,5 +1,6 @@
 import { el, $, field, openDialog, toast } from './dom.js';
-import { currentScope, scopedKey, selectWorkspace, getConnection, setConnection, scopeIsCurrent, scopeIdentityIsCurrent, assertScopeCurrent, lockScope, savedSessionFor, sessionExpiresAt, prepareVisitReload } from './scope.js';
+import { currentScope, scopedKey, selectWorkspace, getConnection, setConnection, scopeIsCurrent, scopeIdentityIsCurrent, assertScopeCurrent, lockScope, savedSessionFor, sessionExpiresAt, prepareVisitReload, returnToWork, sessionAssurance } from './scope.js';
+import { authenticatorPanel } from './mfa-ui.js';
 import { Supabase } from './supabase.js';
 import { db, live, listHistory, undoChange } from './db.js';
 import { sync, checkSetup, listConflicts, resolveConflict } from './sync.js';
@@ -17,9 +18,10 @@ const reload = ({ continueVisit = false } = {}) => {
 const textInput = (value = '', options = {}) => el('input', { value, ...options });
 
 let authTimer, authExpiryTimer, checkingSession = false, privateViewOpened = false, onAuthLock;
-let pageDeparted = false, authActionId = 0;
+let pageDeparted = false, authActionId = 0, personalChallengeOpened = false;
 
 function signedOutScreen(message = '') {
+  personalChallengeOpened = false;
   clearTimeout(authTimer);
   clearTimeout(authExpiryTimer);
   document.documentElement.dataset.auth = 'locked';
@@ -44,6 +46,26 @@ function lockPrivateView(message) {
   lockScope();
   privateViewOpened = false;
   signedOutScreen(message);
+}
+
+function personalAuthScreen(client) {
+  personalChallengeOpened = true;
+  document.documentElement.dataset.auth = 'locked';
+  document.title = 'Verify Personal · Pocket / IFS Bridge';
+  for (const node of document.querySelectorAll('.top, #main-content')) { node.hidden = true; node.inert = true; node.replaceChildren(); }
+  for (const dialog of document.querySelectorAll('dialog')) { dialog.close(); dialog.remove(); }
+  $('#toast-host')?.remove();
+  onAuthLock?.();
+  const request = authActionId, host = $('#auth-screen');
+  if (!host) return;
+  const current = () => !pageDeparted && request === authActionId && scopeIdentityIsCurrent();
+  host.hidden = false;
+  host.replaceChildren(el('div', { class: 'auth-card' },
+    el('h1', {}, 'Unlock Personal'),
+    authenticatorPanel({ client, isCurrent: current, onVerified: () => { if (current()) reload({ continueVisit: true }); } }),
+    el('div', { class: 'row' },
+      el('button', { type: 'button', onclick: () => { if (current()) { returnToWork(); reload({ continueVisit: true }); } } }, 'Open Work instead'),
+      el('button', { type: 'button', onclick: () => { ++authActionId; client.signOut(); reload(); } }, 'Sign out'))));
 }
 
 function scheduleSessionCheck() {
@@ -82,6 +104,7 @@ export async function initAuthGate({ onLock } = {}) {
   onAuthLock = onLock;
   const sessionChanged = () => {
     if (privateViewOpened && !scopeIdentityIsCurrent()) lockPrivateView('You are signed out. Your records are still saved.');
+    else if (personalChallengeOpened && !scopeIdentityIsCurrent()) { ++authActionId; signedOutScreen('Sign in again to continue.'); }
   };
   window.addEventListener('storage', sessionChanged);
   window.addEventListener('ifsbridge:session-changed', sessionChanged);
@@ -102,10 +125,13 @@ export async function initAuthGate({ onLock } = {}) {
     }
   }, true);
   if (!currentScope().userId) { signedOutScreen(); return false; }
+  const c = new Supabase(getConnection());
   try {
-    const c = new Supabase(getConnection());
-    if (navigator.onLine !== false) await c.ensureToken();
+    if (navigator.onLine !== false) await c.ensureToken({ identityOnly: true });
   } catch { /* A still-valid cached session can open its own records offline. */ }
+  if (currentScope().workspace === 'personal' && scopeIdentityIsCurrent() && sessionExpiresAt(savedSessionFor(currentScope().backend)) > Date.now() && sessionAssurance(savedSessionFor(currentScope().backend)) !== 'aal2') {
+    personalAuthScreen(c); return false;
+  }
   if (!scopeIsCurrent()) { signedOutScreen('Sign in again to open your records.'); return false; }
   privateViewOpened = true;
   scheduleSessionCheck();
@@ -197,6 +223,13 @@ export function accountPanel({ signedOut = false } = {}) {
   }
   box.append(connectionSection);
   if (!signedOut && c.signedIn) box.append(el('div', { class: 'row' }, el('button', { type: 'button', onclick: openActivity }, 'History and conflicts')));
+  if (!signedOut && c.signedIn) box.append(el('div', { class: 'row' }, el('button', { type: 'button', onclick: () => {
+    const request = authActionId;
+    let dialog;
+    const panel = authenticatorPanel({ client: c, isCurrent: () => !pageDeparted && request === authActionId && scopeIsCurrent() && !!dialog?.open,
+      onVerified: () => reload({ continueVisit: true }) });
+    dialog = openDialog('Personal authenticator', panel);
+  } }, 'Google Authenticator')));
   box.append(status);
   return box;
 }

@@ -8,6 +8,7 @@ import { openActivity } from './workspace-ui.js';
 import { analyzePersonalMonth, exportPersonalMonthCsv } from './personal-analytics.js';
 import { renderPersonalStudy } from './personal-study.js';
 import { openBankImport, openBankTransaction } from './bank-ui.js';
+import { openWorkExpenseReview } from './work-match-ui.js';
 
 let ctx, preparation, host, view = 'overview', requestId = 0;
 let records = [], budgets = [], inboxCount = 0, conflictCount = 0;
@@ -40,7 +41,10 @@ export function refreshPersonal(change) {
   if (host?.isConnected && !host.hidden && currentScope().workspace === 'personal') return renderPersonal(host, view);
 }
 function analysis() {
-  return analyzePersonalMonth(records, { month: state.month, today: today(), currency: state.currency, categories: ctx.settings().expenseCodes, filters: state.filters, complete: true });
+  // Keep the full bank ledger available in Transactions and Study. The Summary
+  // removes only explicitly classified bank Work charges, not legacy flags.
+  const rows = view === 'overview' ? records.filter(row => !(row.bankTransaction && row.spendingPurpose === 'business')) : records;
+  return analyzePersonalMonth(rows, { month: state.month, today: today(), currency: state.currency, categories: ctx.settings().expenseCodes, filters: state.filters, complete: true });
 }
 function navigateTransactions(filters = {}) {
   state.filters = filters; state.page = 1;
@@ -68,6 +72,7 @@ async function importBank() {
   const sheet = await preparation;
   return openBankImport({ settings: ctx.settings, sheet, onChange: refreshPersonal, sync: scheduleSync });
 }
+function reviewBank() { return openWorkExpenseReview({ month: state.month, onChange: refreshPersonal, sync: scheduleSync }); }
 function editEntry(entry) {
   const row = entry.source || entry;
   return row.bankTransaction ? openBankTransaction(row.id, { settings: ctx.settings, onChange: refreshPersonal, sync: scheduleSync }) : openExpense(row.id);
@@ -75,7 +80,7 @@ function editEntry(entry) {
 function exportMonth() {
   const csv = exportPersonalMonthCsv(records, { month: state.month, categories: ctx.settings().expenseCodes });
   download(`personal-spending-${state.month}.csv`, csv, 'text/csv;charset=utf-8');
-  toast('Exported this month in all recorded currencies.');
+  toast('Exported this month in all recorded currencies and purposes, including Work.');
 }
 
 export async function renderPersonal(root, nextView = 'overview') {
@@ -103,7 +108,7 @@ export async function renderPersonal(root, nextView = 'overview') {
       categories: ctx.settings().expenseCodes, budgets, onOpenEntry: entry => act(() => editEntry(entry))(), onOpenBudgets: act(openBudgets) }));
     else if (view === 'transactions') root.append(transactionPanel(model));
     else root.append(...overview(model));
-    root.append(el('p', { class: 'personal-footnote' }, 'Based on recorded transactions. Refunds reduce spending in the month received. Currencies stay separate.'));
+    root.append(el('p', { class: 'personal-footnote' }, 'Based on recorded transactions. Refunds reduce spending in the month received. Currencies stay separate.', view === 'overview' ? ' Work-classified bank charges are excluded here and remain in Transactions and Study. Needs review is still included until you classify it.' : ' Transactions and month export include all purposes, including Work.'));
   } catch (error) {
     if (ticket !== requestId || !scopeIsCurrent()) return;
     root.replaceChildren(el('div', { class: 'empty', role: 'alert' }, el('h3', {}, 'Spending could not be loaded'), el('p', {}, error.message), button('Try again', () => renderPersonal(root, nextView))));
@@ -112,7 +117,7 @@ export async function renderPersonal(root, nextView = 'overview') {
 
 function toolbar(model) {
   const month = el('input', { type: 'month', value: state.month, min: '1000-01', max: '9999-12', 'aria-label': 'Spending month', onchange: () => { if (setMonth(month.value) === false) month.value = state.month; } });
-  const currencyCodes = [...new Set([...(ctx.settings().currencies || []), ...model.currencyTotals.map(item => item.currency), state.currency])];
+  const currencyCodes = [...new Set([...(ctx.settings().currencies || []), ...model.currencyTotals.map(item => item.currency), ...records.filter(row => !row.deleted && /^[A-Z]{3}$/.test(row.currency || '')).map(row => row.currency), state.currency])];
   const c = supabaseClient();
   const syncText = !navigator.onLine ? 'Offline · saved on this device' : c.signedIn ? 'Account connected' : 'Saved on this device';
   return el('div', { class: 'personal-toolbar' },
@@ -120,7 +125,7 @@ function toolbar(model) {
       el('div', { class: 'personal-month' }, button('‹', () => shiftMonth(-1), { 'aria-label': 'Previous month', disabled: state.month === '1000-01' }), month, button('›', () => shiftMonth(1), { 'aria-label': 'Next month', disabled: state.month === '9999-12' })),
       button('This month', () => setMonth(today().slice(0, 7)), { class: 'personal-this-month', disabled: state.month === today().slice(0, 7) }),
       choice('Spending currency', currencyCodes.map(code => [code, code]), state.currency, setCurrency),
-      el('div', { class: 'personal-toolbar-actions' }, button('Import bank files', act(importBank), { class: 'primary' }), button('+ Add expense', act(newEntry)), button('Tools', act(openExpenseTools)), button('History', act(openActivity), { class: 'link' }))),
+      el('div', { class: 'personal-toolbar-actions' }, button('Import bank files', act(importBank), { class: 'primary' }), button('Review card spending', act(reviewBank)), button('+ Add expense', act(newEntry)), button('Tools', act(openExpenseTools)), button('History', act(openActivity), { class: 'link' }))),
     el('div', { class: 'personal-views', 'aria-label': 'Spending view' },
       ...[['overview', 'Summary'], ['study', 'Study month'], ['transactions', 'Transactions']].map(([key, label]) => button(label, () => renderPersonal(host, key), { 'aria-pressed': String(view === key) }))),
     el('div', { class: 'personal-status' }, el('span', { id: 'exp-sync', role: 'status', 'aria-live': 'polite' }, syncText),
@@ -187,7 +192,7 @@ function breakdown(title, groups, field) {
 function entryRow(entry) {
   const row = button('', act(() => editEntry(entry)), { class: 'personal-entry', 'aria-label': `Edit ${entry.merchant || entry.category}, ${dateLabel(entry.date)}, ${cash(entry.signedMinor, entry.currency)}` });
   row.append(el('span', { class: 'personal-entry-date' }, dateLabel(entry.date)),
-    el('span', { class: 'personal-entry-description' }, el('strong', {}, entry.merchant || entry.category), el('small', {}, `${entry.category}${entry.kind === 'refund' ? ' · Refund' : ''}`), entry.note ? el('span', { class: 'personal-entry-note' }, entry.note) : null),
+    el('span', { class: 'personal-entry-description' }, el('strong', {}, entry.merchant || entry.category), el('small', {}, `${entry.category}${entry.kind === 'refund' ? ' · Refund' : ''}${entry.source?.bankTransaction ? ' · ' + ({ business: 'Work', personal: 'Personal', review: 'Needs review' }[entry.source.spendingPurpose] || 'Needs review') : ''}`), entry.note ? el('span', { class: 'personal-entry-note' }, entry.note) : null),
     el('strong', { class: 'amt' + (entry.kind === 'refund' ? ' personal-refund' : '') }, cash(entry.signedMinor, entry.currency)), el('span', { class: 'personal-edit-hint', 'aria-hidden': 'true' }, '›'));
   return row;
 }

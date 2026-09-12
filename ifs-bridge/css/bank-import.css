@@ -28,3 +28,18 @@
 }
 
 .bank-import p,.bank-import .field,.bank-import details{margin:0}.bank-import summary{cursor:pointer}
+.work-review { display:grid; gap:12px; min-width:0; }
+.work-review p,.work-review .field { margin:0; }
+.work-review-controls,.work-review-tabs { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+.work-review-tabs button[aria-pressed=true] { background:var(--accent-soft,#e0f1f5); border-color:var(--accent,#0e6b87); }
+.work-review-controls .field { flex:1 1 170px; min-width:0; }
+.work-review input,.work-review select { max-width:100%; min-width:0; }
+.work-review-group { border-top:1px solid var(--rule); padding-top:12px; }
+.work-review-group-head { display:flex; flex-wrap:wrap; gap:10px; align-items:center; overflow-wrap:anywhere; }
+.work-review-group-head input { width:18px; height:18px; }
+.work-review-group-head span { color:var(--ink-3); }
+.work-review .bank-preview-row { min-width:0; }
+.work-review .bank-preview-row .field { min-width:0; }
+.work-review-candidate { overflow-wrap:anywhere; }
+.work-review .bank-preview-row select { width:100%; text-overflow:ellipsis; }
+@media(max-width:600px) { .work-review-tabs button { flex:1 1 130px; } .work-review-controls { align-items:stretch; } }

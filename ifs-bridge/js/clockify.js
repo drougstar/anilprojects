@@ -22,7 +22,20 @@ export class Clockify {
 
   user() { return this.get('/user'); }
   projects(ws) { return this.get(`/workspaces/${ws}/projects`, { 'page-size': 200, archived: false }); }
-  tags(ws) { return this.get(`/workspaces/${ws}/tags`, { 'page-size': 200 }); }
+  async tags(ws) {
+    if (!ws) throw new Error('Connect Clockify before syncing tags.');
+    const all = [], seen = new Set();
+    for (let page = 1; page <= 100; page++) {
+      const chunk = await this.get(`/workspaces/${encodeURIComponent(ws)}/tags`, { 'page-size': 200, page });
+      if (!Array.isArray(chunk) || chunk.some(tag => !tag || typeof tag.id !== 'string' || typeof tag.name !== 'string')) throw new Error('Clockify returned an invalid tag list. Try syncing tags again.');
+      for (const tag of chunk) {
+        if (seen.has(tag.id)) throw new Error('Clockify repeated a tag page. No partial tag list was applied; try again.');
+        seen.add(tag.id); all.push(tag);
+      }
+      if (chunk.length < 200) return all.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    throw new Error('Clockify tag list exceeded the supported page limit. No partial tag list was applied.');
+  }
 
   async entries(ws, userId, startIso, endIso) {
     const all = [];

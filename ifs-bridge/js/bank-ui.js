@@ -186,6 +186,7 @@ export async function openBankTransaction(id, { settings, onChange = () => {}, s
   const save = el('button', { type: 'button', class: 'primary' }, 'Save transaction');
   const d = openDialog('Bank transaction', el('div', { class: 'form' }, description,
     !spending(row) ? el('p', { class: 'help' }, 'Kept for reference and excluded from spending totals.') : null,
+    row.workExpenseLink?.workspace === 'work' ? el('p', { class: 'help' }, `Linked to Work expense ${row.workExpenseLink.expenseId}. Changing its purpose to Personal or Needs review removes the link; the Work expense is unchanged.`) : row.workTripSuggestion?.workspace === 'work' ? el('p', { class: 'help' }, 'Classified as Work after your trip review. This has not created a Work expense or reimbursement.') : null,
     field('Merchant', merchant), spending(row) ? field('Category', category) : null, spending(row) ? field('Purpose', purpose) : null, field('Note', note),
     el('div', { class: 'actions' }, save, confirmButton('Delete transaction', async () => {
       try { assertScopeCurrent(); await atomicBatchSave([{ table: 'expenses', record: { ...row, deleted: true }, expectedUpdatedAt: row.updated_at }], { label: 'Delete bank transaction' }); if (!scopeIsCurrent()) return; d.close(); await onChange(); sync(); }
@@ -195,6 +196,7 @@ export async function openBankTransaction(id, { settings, onChange = () => {}, s
     try {
       assertScopeCurrent(); save.disabled = true;
       const updated = { ...row, bankReviewFields: [...new Set([...(row.bankReviewFields || []), 'merchant', 'personalCategory', 'spendingPurpose', 'note'])], merchant: merchant.value.trim(), vendor: merchant.value.trim(), note: note.value.trim(), written: note.value.trim(), ...(spending(row) ? { personalCategory: category.value.trim() || 'Uncategorized', spendingPurpose: purpose.value, business: purpose.value === 'business', code: Number(currentSettings().expenseCodes?.find(c => c.short === category.value.trim())?.code || 90009) } : {}) };
+      if (spending(row) && purpose.value !== 'business') { delete updated.workExpenseLink; delete updated.workTripSuggestion; }
       await atomicBatchSave([{ table: 'expenses', record: updated, expectedUpdatedAt: row.updated_at }], { label: 'Classify bank transaction' });
       if (!scopeIsCurrent() || !d.isConnected) return;
       d.close(); await onChange({ entry: updated }); sync();

@@ -23,12 +23,13 @@ let weekEntries = [];      // raw Clockify entries of the loaded week (for the e
 let clockifyMeta = null;   // { projects, tags } for the entry dialog
 let clockifyConnectId = 0;
 let settingsImportUndo = null;
+let clockifyTags = null;
 
 function invalidateClockifyView() {
   // An in-flight request or cached editor must not bring the previous account back.
   ++weekLoadId;
   week = null; weekEntries = []; exportText = '';
-  clockifyProjects = null; clockifyMeta = null;
+  clockifyProjects = null; clockifyMeta = null; clockifyTags = null;
   $('#week-result')?.replaceChildren();
   $('#week-result')?.removeAttribute('aria-busy');
   if ($('#week-status')) $('#week-status').textContent = '';
@@ -150,10 +151,24 @@ async function loadWeek() {
 }
 
 function makeExport(w) {
+  if (w.canExport === false) return '';
   const template = parseCopyObject(settings.template);
   if (!template) return '';
   const id = settings.identity;
-  const records = w.rows.map(r => {
+  // The review keeps direct-code pay separate, while IFS expects a single row
+  // for each activity/code even when two confirmed tags contribute to it.
+  const exportRows = new Map();
+  for (const row of w.rows) {
+    const m = row.mapping, key = [m.shortName, m.projectId, m.subProjectId, m.activityNo, m.activitySeq, row.code].join('|');
+    const prior = exportRows.get(key);
+    if (!prior) exportRows.set(key, { ...row, hours: [...row.hours] });
+    else {
+      prior.hours = prior.hours.map((hours, day) => Math.round((hours + row.hours[day]) * 100) / 100);
+      prior.total = Math.round((prior.total + row.total) * 100) / 100;
+      prior.description ||= row.description;
+    }
+  }
+  const records = [...exportRows.values()].map(r => {
     const m = r.mapping;
     const o = {
       RESOURCE_SEQ: id.resourceSeq, RESOURCE_ID: id.resourceId, 'RESOURCE_API.GET_DESCRIPTION(RESOURCE_SEQ)': id.resourceName,
@@ -163,7 +178,7 @@ function makeExport(w) {
       SUB_PROJECT_ID: m.subProjectId, 'SUB_PROJECT_API.GET_DESCRIPTION(PROJECT_ID,SUB_PROJECT_ID)': m.subProjectDesc,
       ACTIVITY_NO: m.activityNo, ACTIVITY_SEQ: m.activitySeq, 'ACTIVITY_API.GET_DESCRIPTION(ACTIVITY_SEQ)': m.activityDesc,
       REPORT_COST_CODE: r.code,
-      'REPORT_COST_API.GET_DESCRIPTION_NEW_DATES(COMPANY_ID,REPORT_COST_CODE, ACCOUNT_DATE)': settings.codeDescriptions[r.code] || '',
+      'REPORT_COST_API.GET_DESCRIPTION_NEW_DATES(COMPANY_ID,REPORT_COST_CODE, ACCOUNT_DATE)': r.description || settings.codeDescriptions[r.code] || '',
       $15: ifsNumber(r.total),
     };
     ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'].forEach((d, i) => { o[`${d}_INTERNAL_QUANTITY`] = r.hours[i] > 0 ? ifsNumber(r.hours[i]) : ''; });
@@ -186,7 +201,7 @@ function renderWeek() {
   const head = el('tr', {}, el('th', {}, 'IFS activity'), el('th', {}, 'Code'), w.dates.map((d, i) => el('th', { class: 'num' }, el('span', {}, DAYS[i]), el('small', {}, d.slice(5)))), el('th', { class: 'num' }, 'Total'));
   const body = w.rows.map(r => el('tr', { class: r.code === settings.codes.ot2 ? 'ot2' : r.code === settings.codes.ot15 ? 'ot15' : '' },
     el('td', {}, el('b', {}, r.mapping.shortName || r.mapping.clockifyProjectName), el('small', {}, r.mapping.activityDesc || r.mapping.projectName || '')),
-    el('td', {}, el('span', { class: 'code' }, r.code)),
+    el('td', {}, el('span', { class: 'code' }, r.code), r.directCode ? el('small', {}, r.description || 'Confirmed tag') : null),
     r.hours.map(h => el('td', { class: 'num' }, fmtH(h))),
     el('td', { class: 'num total' }, fmtH(r.total))));
   const foot = el('tr', { class: 'totals' }, el('td', { colspan: 2 }, 'Day total'), w.dayTotals.map(h => el('td', { class: 'num' }, fmtH(h))), el('td', { class: 'num total' }, fmtH(w.weekTotal)));
@@ -479,6 +494,7 @@ async function openEntryDialog(entry, dayIso) {
 
 async function copyExport() {
   const s = $('#copy-status');
+  if (!scopeIsCurrent() || !week?.canExport || !exportText) return;
   try { await navigator.clipboard.writeText(exportText); s.textContent = 'Copied. Now paste into the IFS grid (right-click → Edit → Paste Object).'; }
   catch { s.textContent = 'Clipboard blocked. Open "Show the IFS text" and copy it by hand.'; }
 }
@@ -614,6 +630,7 @@ function renderSettings() {
   const step = txt(s.roundStep, { type: 'number', step: '0.25', min: '0.25' });
   const mode = el('select', {}, [['nearest', 'nearest'], ['down', 'down'], ['up', 'up']].map(([v, l]) => el('option', { value: v, selected: s.roundMode === v ? 'selected' : null }, l)));
   const t15 = txt(s.tags.x15), t2 = txt(s.tags.x2), tTr = txt(s.tags.travel), tTrOT = txt(s.tags.travelOT), kw = txt(s.travelKeyword);
+  for (const input of [t15, t2, tTr, tTrOT]) input.setAttribute('list', 'clockify-tag-choices');
   const cReg = txt(s.codes.regular), c15 = txt(s.codes.ot15), c2 = txt(s.codes.ot2), cTr = txt(s.codes.travel), cTrR = txt(s.codes.travelRegular);
   const dReg = txt(s.codeDescriptions[s.codes.regular] || ''), d15 = txt(s.codeDescriptions[s.codes.ot15] || ''), d2 = txt(s.codeDescriptions[s.codes.ot2] || ''), dTr = txt(s.codeDescriptions[s.codes.travel] || ''), dTrR = txt(s.codeDescriptions[s.codes.travelRegular] || '');
   const hol = el('textarea', { rows: 2, placeholder: '2026-10-29, 2026-01-01', spellcheck: 'false' }, (s.holidays || []).join(', '));
@@ -630,6 +647,8 @@ function renderSettings() {
     el('div', { class: 'grid3' }, field('Clockify tag for ×1.5', t15), field('Clockify tag for ×2', t2), field('Clockify tag for travel', tTr), field('Clockify tag for travel overtime', tTrOT, 'Forces the whole entry to travel overtime ×1.'), field('Or description starting with', kw, 'So "Travel" entries count as normal travel without a tag.'))));
 
   // Mapping
+  const timeCodes = renderTimeCodeSettings(s, () => ({ ...s.clockify, enteredKey: key.value.trim() }));
+  root.append(timeCodes.section);
   const mapHost = el('div', { class: 'tbl' });
   const renderMap = () => {
     mapHost.replaceChildren(el('table', { class: 'map' },
@@ -692,7 +711,12 @@ function renderSettings() {
     templateArea.value = s.template;
     const desc = rec.fields.find(f => f.name.startsWith('REPORT_COST_API.GET_DESCRIPTION'));
     const code = rec.fields.find(f => f.name === 'REPORT_COST_CODE');
-    if (code?.value && desc?.value) { s.codeDescriptions[code.value] = desc.value; notes.push(`${code.value} = ${desc.value}`); }
+    if (code?.value && desc?.value) {
+      s.codeDescriptions[code.value] = desc.value;
+      s.timeCodeCatalog = [...(s.timeCodeCatalog || []).filter(item => item.code !== code.value), { code: code.value, description: desc.value, source: 'ifs-copy' }];
+      timeCodes.refreshCatalog();
+      notes.push(`${code.value} = ${desc.value}; available as a choice in time-code settings`);
+    }
     st.textContent = `Imported: ${notes.join(', ') || 'template only'}. Save to keep it.`;
   } }, 'Import row');
   const templateArea = el('textarea', { rows: 8, spellcheck: 'false' }, s.template);
@@ -781,7 +805,9 @@ function renderSettings() {
         Object.assign(row, value);
         if (travel && value.travel) { Object.assign(travel, value.travel); row.travel = travel; }
       });
-      Object.assign(settings, next, { identity: settings.identity, mapping: settings.mapping });
+      next.timeCodeMappings?.forEach((value, index) => Object.assign(settings.timeCodeMappings[index], value));
+      Object.assign(settings, next, { identity: settings.identity, mapping: settings.mapping, ...(settings.timeCodeMappings ? { timeCodeMappings: settings.timeCodeMappings } : {}) });
+      invalidateClockifyView();
       saveStatus.textContent = 'Saved.';
     } catch (err) { if (scopeIsCurrent()) saveStatus.textContent = `Save failed: ${err.message}`; }
   } }, 'Save settings');
@@ -792,7 +818,7 @@ function renderSettings() {
   if (currentScope().workspace === 'personal') {
     for (const section of [...root.querySelectorAll('section')]) {
       const title = section.querySelector('h3')?.textContent;
-      if (['Pay estimate', 'Clockify', 'Rules', 'Clockify project → IFS activity', 'IFS identity'].includes(title)) section.remove();
+      if (['Pay estimate', 'Clockify', 'Rules', 'Clockify tags and time codes', 'Clockify project → IFS activity', 'IFS identity'].includes(title)) section.remove();
       if (title === 'Expenses') {
         const nodes = [...section.children], index = nodes.findIndex(n => n.tagName === 'H4' && n.textContent === 'Backup and export');
         section.replaceChildren(el('h3', {}, 'Spending preferences'), field('Default currency', defCur), ...(index < 0 ? [] : nodes.slice(index)));
@@ -801,7 +827,7 @@ function renderSettings() {
   }
   // Fold every section; the ones that still need attention start open, the rest remember your choice.
   const c = supabaseClient();
-  const needs = { Clockify: !settings.clockify.apiKey, 'Import and export settings': true };
+  const needs = { Clockify: !settings.clockify.apiKey, 'Import and export settings': true, 'Clockify tags and time codes': (settings.timeCodeMappings || []).some(row => !row.confirmed) };
   const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Account and sync': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
   for (const sec of root.querySelectorAll('section')) {
     const h3 = sec.querySelector('h3'); if (!h3) continue;
@@ -823,6 +849,90 @@ function renderSettings() {
   });
   root.append(fields, el('div', { class: 'actions settings-save' }, saveBtn, saveStatus));
   if (backupAvailable()) backupMeta().then(m => { const e = $('#pc-backup-state'); if (e) e.textContent = m?.savedAt ? `Last PC backup ${new Date(m.savedAt).toLocaleString()} (${Math.max(1, Math.round(m.bytes / 1024))} KB) in ${m.path}` : 'No PC backup yet.'; });
+}
+
+// This panel only reads Clockify. Every time-code meaning needs the owner's
+// confirmation, so a bank-style suggestion can never become a payroll rule.
+function renderTimeCodeSettings(s, connection) {
+  const status = el('p', { id: 'time-code-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
+  const list = el('datalist', { id: 'clockify-tag-choices' });
+  const catalog = el('datalist', { id: 'ifs-time-code-choices' });
+  const rows = el('div', { id: 'time-code-rows' });
+  const field = (name, input) => el('label', { class: 'field' }, el('span', {}, name), input);
+  const section = el('section', {}, el('h3', {}, 'Clockify tags and time codes'));
+  let request = 0;
+  const edited = () => { if ($('#save-status')) $('#save-status').textContent = 'Unsaved changes'; };
+  const refreshCatalog = () => {
+    // F_07 is documented in this project's IFS design notes. It is a choice,
+    // never an assignment. The annual-leave code is deliberately unknown.
+    const choices = new Map([['F_07', 'Resmi Tatil — documented suggestion; confirm against IFS']]);
+    for (const [code, description] of Object.entries(s.codeDescriptions || {})) choices.set(code, description);
+    for (const item of s.timeCodeCatalog || []) choices.set(item.code, `${item.description} (${item.source === 'ifs-copy' ? 'copied from IFS' : item.source})`);
+    catalog.replaceChildren(...[...choices].map(([code, description]) => el('option', { value: code }, description)));
+  };
+  const refresh = () => {
+    list.replaceChildren(...(clockifyTags || []).map(tag => el('option', { value: tag.name }, tag.archived ? 'Archived' : tag.name)));
+    const mappings = s.timeCodeMappings || [];
+    rows.replaceChildren(...mappings.map((row, index) => {
+      const name = el('input', { value: row.tagName || '', list: 'clockify-tag-choices', 'aria-label': `Clockify tag ${index + 1}` });
+      const kind = el('select', { 'aria-label': `Use of tag ${index + 1}` }, [['review', 'Choose meaning…'], ['code', 'Direct IFS time code'], ['label', 'Label only']].map(([value, text]) => el('option', { value, selected: (row.mode || 'review') === value }, text)));
+      const code = el('input', { value: row.code || '', list: 'ifs-time-code-choices', maxlength: '40', placeholder: 'Copy the code from IFS', 'aria-label': `IFS code ${index + 1}` });
+      const description = el('input', { value: row.description || '', placeholder: 'Description shown in IFS', 'aria-label': `IFS description ${index + 1}` });
+      const multiplier = el('input', { type: 'number', value: row.payMultiplier ?? '', min: '0', max: '10', step: '0.25', placeholder: 'Unknown', 'aria-label': `Pay multiplier ${index + 1}` });
+      const rowStatus = el('span', { class: 'muted', role: 'status' }, row.confirmed ? 'Confirmed' : 'Needs confirmation');
+      const reset = () => { row.confirmed = false; rowStatus.textContent = 'Needs confirmation'; edited(); };
+      name.addEventListener('input', () => { row.tagName = name.value.trim(); row.tagId = (clockifyTags || []).find(tag => tag.name === row.tagName)?.id || ''; reset(); });
+      kind.addEventListener('change', () => { row.mode = kind.value; code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code'; reset(); });
+      code.addEventListener('input', () => { row.code = code.value.trim(); reset(); });
+      description.addEventListener('input', () => { row.description = description.value.trim(); reset(); });
+      multiplier.addEventListener('input', () => { row.payMultiplier = multiplier.value === '' ? null : Number(multiplier.value); reset(); });
+      code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code';
+      const confirm = el('button', { class: 'time-code-confirm', onclick: () => {
+        assertScopeCurrent();
+        if (!row.tagName || !['code', 'label'].includes(row.mode)) { rowStatus.textContent = 'Choose a tag and its meaning first.'; return; }
+        if (row.mode === 'code' && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/.test(row.code || '')) { rowStatus.textContent = 'Enter the actual IFS report code first.'; return; }
+        if (row.mode === 'code' && row.payMultiplier != null && (!Number.isFinite(row.payMultiplier) || row.payMultiplier < 0 || row.payMultiplier > 10)) { rowStatus.textContent = 'Use a pay multiplier from 0 to 10, or leave it unknown.'; return; }
+        if (mappings.some(other => other !== row && (other.tagName === row.tagName || (row.tagId && other.tagId === row.tagId)))) { rowStatus.textContent = 'This tag has another mapping. Keep one mapping per tag.'; return; }
+        row.confirmed = true; rowStatus.textContent = 'Confirmed · Save settings to keep it'; edited();
+      } }, 'Confirm meaning');
+      return el('div', { class: 'time-code-row', style: 'padding:12px 0;border-bottom:1px solid var(--border)' },
+        el('div', { class: 'grid3' }, field('Clockify tag', name), field('Use this tag as', kind), field('IFS report code', code), field('IFS description', description), field('Pay multiplier (optional)', multiplier)),
+        el('div', { class: 'row' }, confirm, rowStatus, el('button', { class: 'link', onclick: () => { assertScopeCurrent(); s.timeCodeMappings.splice(index, 1); edited(); refresh(); } }, 'Remove mapping')));
+    }));
+    if (!mappings.length) rows.append(el('p', { class: 'muted' }, 'Sync tags to review other time codes, or add a tag manually.'));
+  };
+  const syncTags = el('button', { id: 'sync-clockify-tags', onclick: async () => {
+    const connected = connection(), id = ++request;
+    if (!connected.apiKey || !connected.workspaceId || connected.enteredKey !== connected.apiKey) { status.textContent = 'Connect and save your Clockify API key first.'; return; }
+    assertScopeCurrent(); syncTags.disabled = true; status.textContent = 'Reading all Clockify tags…';
+    try {
+      const tags = await new Clockify(connected.apiKey).tags(connected.workspaceId);
+      const current = connection();
+      if (!scopeIsCurrent() || !section.isConnected || id !== request || current.apiKey !== connected.apiKey || current.enteredKey !== connected.apiKey || current.workspaceId !== connected.workspaceId) return;
+      clockifyTags = tags;
+      const legacy = new Set(Object.values(s.tags || {}).filter(Boolean));
+      s.timeCodeMappings ||= [];
+      let added = 0;
+      for (const tag of tags) {
+        const existing = s.timeCodeMappings.find(row => (row.tagId && row.tagId === tag.id) || row.tagName === tag.name);
+        if (existing) {
+          if (existing.tagId === tag.id && existing.tagName !== tag.name) { existing.tagName = tag.name; existing.confirmed = false; added++; }
+          continue;
+        }
+        if (legacy.has(tag.name)) continue;
+        s.timeCodeMappings.push({ tagId: tag.id, tagName: tag.name, mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null }); added++;
+      }
+      refresh(); if (added) edited();
+      status.textContent = `${tags.length} tags synced. ${added} new or renamed tag${added === 1 ? '' : 's'} need your choice and confirmation. Existing overtime/travel tag fields can now use the same list.`;
+    } catch (error) { if (scopeIsCurrent() && section.isConnected && id === request) status.textContent = `Tag sync failed: ${error.message}`; }
+    finally { syncTags.disabled = false; }
+  } }, 'Sync Clockify tags');
+  section.append(el('p', { class: 'muted' }, 'Clockify supplies tag names, not IFS codes. Choose what each additional tag means. New or changed meanings need your confirmation before hours can be exported.'),
+    el('div', { class: 'row' }, syncTags, el('button', { id: 'add-time-code', onclick: () => { assertScopeCurrent(); (s.timeCodeMappings ||= []).push({ tagId: '', tagName: '', mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null }); edited(); refresh(); } }, 'Add tag manually')), status,
+    el('p', { class: 'help' }, 'Resmi Tatil: F_07 is a documented suggestion. Yıllık izin: copy an annual-leave row from IFS below to learn its code. No code is assigned automatically.'),
+    el('p', { class: 'help' }, 'Direct codes use the recorded hours with rounding, without weekend overtime or a minimum-day top-up. A day containing direct-code time gets no automatic minimum top-up. An optional pay multiplier affects estimates only; leave it blank when unknown.'), list, catalog, rows);
+  refreshCatalog(); refresh();
+  return { section, refreshCatalog };
 }
 
 function rebuildTemplate(rec) {

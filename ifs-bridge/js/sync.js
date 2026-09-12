@@ -62,7 +62,12 @@ export function planSyncBatches(queue, history, blocked = new Set(), limit = 500
 export async function checkSetup(client) {
   if (!client.configured) return 'Enter the project URL and anon key first.';
   if (!client.signedIn) return 'Sign in first.';
-  try { client.assertScope(); return Number(await client.schemaVersion()) === 2 ? 'ok' : MIGRATION; }
+  try {
+    client.assertScope();
+    const version = Number(await client.schemaVersion());
+    if (SCOPE.workspace === 'personal' && version < 3) return 'Personal sync needs the authenticator update. Run supabase/personal-mfa-v3.sql in your Supabase SQL editor, then try again.';
+    return [2, 3].includes(version) ? 'ok' : MIGRATION;
+  }
   catch (e) { return /404|PGRST202|42883|does not exist|schema cache/.test(e.message) ? MIGRATION : e.message; }
 }
 export async function sync(client, onStatus = () => {}) {

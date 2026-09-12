@@ -62,6 +62,8 @@ const workShape = {
   travelKeyword: (value, path) => { string()(value, path); try { new RegExp(`^\\s*${value}\\b`, 'i'); } catch { invalid(path); } return value; },
   codes: object({ regular: string(), ot15: string(), ot2: string(), travel: string(), travelRegular: string() }),
   codeDescriptions: dictionary(string()),
+  timeCodeMappings: array(object({ tagId: string(200), tagName: string(200), mode: enumeration(['review', 'code', 'label']), code: string(40), description: string(2000), confirmed: bool, payMultiplier: (value, path) => value === null ? null : number(0, 10)(value, path) }, ['tagName', 'mode', 'confirmed']), 20000),
+  timeCodeCatalog: array(object({ code: string(40), description: string(2000), source: enumeration(['ifs-copy', 'manual', 'documented']) }, ['code', 'description', 'source']), 1000),
   identity: object({ companyId: string(), empNo: string(), resourceId: string(), resourceSeq: string(), resourceName: string() }),
   template: string(200000), defaultCurrency: currency, currencies: array(currency, 200, 1), costObjects: array(string()),
   expenseCodes: array(object({ code, desc: string(), short: string() }, ['code', 'desc', 'short']), 1000, 1),

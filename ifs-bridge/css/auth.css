@@ -10,3 +10,8 @@ html[data-auth="locked"] body > :not(#auth-screen):not(noscript) { display: none
 .auth-card .more-opts { margin-top: 24px; }
 .auth-card input { width: 100%; font-size: 16px; }
 .auth-message { padding: 12px; border: 1px solid var(--line, #ccc); border-radius: 8px; }
+
+.authenticator-panel .mfa-qr { display:block; width:220px; max-width:100%; height:auto; background:white; margin:1rem auto; }
+.authenticator-panel .mfa-verify { display:grid; gap:.8rem; margin:1rem 0; }
+.authenticator-panel input { min-width:0; width:100%; }
+
