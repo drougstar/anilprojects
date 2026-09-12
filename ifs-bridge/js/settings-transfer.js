@@ -56,6 +56,7 @@ const travel = object({ activityNo: string(), activitySeq: string(), activityDes
 const mapping = object({ clockifyProjectId: string(), clockifyProjectName: string(), kind: enumeration(['project', 'general', 'ignore']), regularHours: optionalHours, travelAfterHours: optionalHours,
   projectId: string(), projectName: string(), subProjectId: string(), subProjectDesc: string(), activityNo: string(), activitySeq: string(), activityDesc: string(), shortName: string(), travel });
 const workShape = {
+  timeCalculationMode: enumeration(['rules', 'tags']), timeCodeMappingsVersion: enumeration([2]),
   timeZone: timezone, regularHours: number(0, 24), travelAfterHours: number(0, 24), topUpMinimum: bool,
   roundStep: number(0.001, 24), roundMode: enumeration(['nearest', 'down', 'up']), holidays: array(date, 10000),
   tags: object({ x15: string(), x2: string(), travel: string(), travelOT: string() }),
@@ -136,6 +137,14 @@ export function parseSettingsFile(text, { workspace, current = {} } = {}) {
     if (key === 'clockify') continue;
     // Nested forms keep fields absent from older exports; an imported list replaces that list.
     settings[key] = plain(value) ? { ...(plain(settings[key]) ? settings[key] : {}), ...structuredClone(value) } : structuredClone(value);
+  }
+  // A legacy export defines its own tag setup. Do not let a newer device's
+  // unified marker or unrelated mappings silently override that imported setup.
+  if (workspace === 'work' && own(imported, 'tags') && !own(imported, 'timeCodeMappingsVersion')) {
+    settings.tags = { x15: '', x2: '', travel: '', travelOT: '', ...structuredClone(imported.tags) };
+    settings.timeCodeMappings = structuredClone(imported.timeCodeMappings || []);
+    delete settings.timeCodeMappingsVersion;
+    if (!own(imported, 'timeCalculationMode')) delete settings.timeCalculationMode;
   }
   if (settings.currencies && settings.defaultCurrency && !settings.currencies.includes(settings.defaultCurrency)) fail('Default currency is missing from the currency list. Include both settings in the file.');
   const includesApiKey = own(imported, 'clockify');

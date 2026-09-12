@@ -2,6 +2,7 @@ import { currentScope, scopedKey, scopeIsCurrent, assertScopeCurrent } from './s
 import { initWorkspaceUI, accountPanel, initAuthGate, revealPrivateApp } from './workspace-ui.js';
 import { Clockify } from './clockify.js';
 import { buildWeek, mondayOf, fetchWindow, DAYS, localToUtc, utcToLocalInput } from './rules.js';
+import { TIME_CODE_CATALOG, effectiveTimeCodeMappings, calculationMode, timeCodeInfo } from './time-codes.js';
 import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber, activityFromRecord, identityFromRecord } from './ifs.js';
 import { loadSettings, saveSettings, DEFAULTS, defaultsForScope } from './store.js';
 import { createSettingsFile, parseSettingsFile } from './settings-transfer.js';
@@ -25,11 +26,11 @@ let clockifyConnectId = 0;
 let settingsImportUndo = null;
 let clockifyTags = null;
 
-function invalidateClockifyView() {
+function invalidateClockifyView({ keepMetadata = false } = {}) {
   // An in-flight request or cached editor must not bring the previous account back.
   ++weekLoadId;
   week = null; weekEntries = []; exportText = '';
-  clockifyProjects = null; clockifyMeta = null; clockifyTags = null;
+  if (!keepMetadata) { clockifyProjects = null; clockifyMeta = null; clockifyTags = null; }
   $('#week-result')?.replaceChildren();
   $('#week-result')?.removeAttribute('aria-busy');
   if ($('#week-status')) $('#week-status').textContent = '';
@@ -485,7 +486,7 @@ async function openEntryDialog(entry, dayIso) {
   const d = openDialog(isNew ? 'New Clockify entry' : 'Edit Clockify entry', el('div', { class: 'form' },
     dlgField('Project', project, 'The Clockify project. The mapping in Settings turns it into the IFS activity.'),
     el('div', { class: 'grid3' }, dlgField('Date', date, `Local, ${tz}.`), dlgField('Start', start, '24-hour, e.g. 08:30'), dlgField('End', end, hours)),
-    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Overtime, Overtime x2, Travel and Travel OT decide the report code.')),
+    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Time calculation and tags. Leave and holiday codes use General.')),
     dlgField('Description', desc, 'Free text. A line “Short Name: 210701.010101.010101-B” sends the entry to that IFS activity.'),
     el('div', { class: 'actions' }, saveBtn, el('button', { onclick: () => d.close() }, 'Cancel'),
       isNew ? null : confirmButton('Delete in Clockify', async () => { try { await c.deleteEntry(ws, entry.id); d.close(); toast('Deleted in Clockify'); await loadWeek(); } catch (e) { status.textContent = e.message; } }),
@@ -595,8 +596,8 @@ function renderSettings() {
     el('div', { class: 'grid3' },
       field('Hourly rate', el('div', { class: 'row tight' }, payRate, payCur), 'Gross rate per hour. Only used for the estimate on the Overview tab.'),
       field('Day minimum (h)', payMin, 'A worked weekday counts as at least this many regular hours; an 8 h day on a US project gets 1 h added.'),
-      el('label', { class: 'field' }, el('span', {}, 'Paid rest days'), el('span', { class: 'row' }, restOn, 'Sundays and holidays count, at', restH, 'h each'), el('small', {}, '45 h over 6 days gives 7.5 h. Holidays come from Rules → Holidays.'))),
-    el('small', { class: 'help' }, 'Multipliers: regular, travel, day minimum and rest days ×1; overtime ×1.5 and ×2.')));
+      el('label', { class: 'field' }, el('span', {}, 'Paid rest days'), el('span', { class: 'row' }, restOn, 'Sundays and holidays count, at', restH, 'h each'), el('small', {}, '45 h over 6 days gives 7.5 h. Dates come from Time calculation and tags → Automatic rules.'))),
+    el('small', { class: 'help' }, 'Multipliers: regular and travel ×1; overtime ×1.5 and ×2. Day minimum and paid rest additions apply only in Automatic rules mode. Leave pay stays unknown unless you set its multiplier.')));
 
   // Clockify
   const key = txt(s.clockify.apiKey, { type: 'password', autocomplete: 'off', spellcheck: 'false', id: 'set-key' });
@@ -629,25 +630,31 @@ function renderSettings() {
   const trAfter = txt(s.travelAfterHours, { type: 'number', step: '0.5', min: '0' });
   const step = txt(s.roundStep, { type: 'number', step: '0.25', min: '0.25' });
   const mode = el('select', {}, [['nearest', 'nearest'], ['down', 'down'], ['up', 'up']].map(([v, l]) => el('option', { value: v, selected: s.roundMode === v ? 'selected' : null }, l)));
-  const t15 = txt(s.tags.x15), t2 = txt(s.tags.x2), tTr = txt(s.tags.travel), tTrOT = txt(s.tags.travelOT), kw = txt(s.travelKeyword);
-  for (const input of [t15, t2, tTr, tTrOT]) input.setAttribute('list', 'clockify-tag-choices');
+  const kw = txt(s.travelKeyword);
   const cReg = txt(s.codes.regular), c15 = txt(s.codes.ot15), c2 = txt(s.codes.ot2), cTr = txt(s.codes.travel), cTrR = txt(s.codes.travelRegular);
   const dReg = txt(s.codeDescriptions[s.codes.regular] || ''), d15 = txt(s.codeDescriptions[s.codes.ot15] || ''), d2 = txt(s.codeDescriptions[s.codes.ot2] || ''), dTr = txt(s.codeDescriptions[s.codes.travel] || ''), dTrR = txt(s.codeDescriptions[s.codes.travelRegular] || '');
   const hol = el('textarea', { rows: 2, placeholder: '2026-10-29, 2026-01-01', spellcheck: 'false' }, (s.holidays || []).join(', '));
   const topUp = el('input', { type: 'checkbox', checked: s.topUpMinimum !== false ? 'checked' : null });
-  root.append(el('section', {}, el('h3', {}, 'Rules'),
+  const automaticRules = el('fieldset', { id: 'automatic-time-rules', style: 'border:0;padding:0;margin:0' },
     el('div', { class: 'grid3' },
       field('Regular hours per weekday', reg, 'Default. A project can override it below (US projects: 8). General/break counts inside it.'),
-      field('Travel overtime after (h)', trAfter, 'Weekday travel beyond this many hours of work + travel is travel overtime ×1.'),
-      field('Round each day/project to (h)', step)),
-    el('div', { class: 'grid3' }, field('Rounding', mode), field('Holidays (dates, comma separated)', hol, 'Counted like Sunday: work ×2, travel ×1.'),
+      field('Travel overtime after (h)', trAfter, 'Weekday travel beyond this many hours of work + travel is travel overtime ×1.')),
+    el('div', { class: 'grid3' }, field('Holidays (dates, comma separated)', hol, 'Worked hours count like Sunday: work ×2, travel ×1. The Holiday tag instead records F_07 on General.'),
       el('label', { class: 'field check' }, el('span', {}, 'Minimum day'), el('span', { class: 'row' }, topUp, 'Book at least the regular hours on a worked weekday'), el('small', {}, 'IFS expects 8 h abroad and 9 h in Turkey even if less was logged.'))),
     el('div', { class: 'grid3' }, field('Regular code', cReg), field('Overtime ×1.5 code', c15), field('Overtime ×2 code', c2), field('Travel regular code', cTrR), field('Travel overtime ×1 code', cTr)),
     el('div', { class: 'grid3' }, field('Regular description', dReg, 'As IFS shows it, optional.'), field('×1.5 description', d15), field('×2 description', d2), field('Travel regular description', dTrR), field('Travel overtime description', dTr)),
-    el('div', { class: 'grid3' }, field('Clockify tag for ×1.5', t15), field('Clockify tag for ×2', t2), field('Clockify tag for travel', tTr), field('Clockify tag for travel overtime', tTrOT, 'Forces the whole entry to travel overtime ×1.'), field('Or description starting with', kw, 'So "Travel" entries count as normal travel without a tag.'))));
+    field('Or description starting with', kw, 'In Automatic rules mode, descriptions starting with this word count as travel without a tag.'));
 
   // Mapping
-  const timeCodes = renderTimeCodeSettings(s, () => ({ ...s.clockify, enteredKey: key.value.trim() }));
+  const automaticDetails = el('details', { id: 'automatic-rules-details' }, el('summary', {}, 'Automatic rules'), automaticRules);
+  const reflectCalculationMode = value => {
+    const useTags = value === 'tags';
+    automaticDetails.hidden = automaticRules.disabled = useTags;
+    for (const control of [payMin, restOn, restH]) control.disabled = useTags;
+  };
+  const timeCodes = renderTimeCodeSettings(s, () => ({ ...s.clockify, enteredKey: key.value.trim() }), reflectCalculationMode);
+  timeCodes.controls.append(el('div', { class: 'grid2' }, field('Round each day/project to (h)', step), field('Rounding', mode)), automaticDetails);
+  reflectCalculationMode(calculationMode(s));
   root.append(timeCodes.section);
   const mapHost = el('div', { class: 'tbl' });
   const renderMap = () => {
@@ -788,7 +795,7 @@ function renderSettings() {
     next.regularHours = Number(reg.value) || 9; next.travelAfterHours = Number(trAfter.value) || next.regularHours;
     next.roundStep = Number(step.value) || 0.5; next.roundMode = mode.value; next.topUpMinimum = topUp.checked;
     next.holidays = hol.value.split(/[\s,;]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
-    next.tags = { x15: t15.value.trim(), x2: t2.value.trim(), travel: tTr.value.trim(), travelOT: tTrOT.value.trim() }; next.travelKeyword = kw.value.trim();
+    next.travelKeyword = kw.value.trim();
     next.codes = { regular: cReg.value.trim(), ot15: c15.value.trim(), ot2: c2.value.trim(), travel: cTr.value.trim(), travelRegular: cTrR.value.trim() };
     next.codeDescriptions = { ...next.codeDescriptions, [next.codes.regular]: dReg.value, [next.codes.ot15]: d15.value, [next.codes.ot2]: d2.value, [next.codes.travel]: dTr.value, [next.codes.travelRegular]: dTrR.value };
     return next;
@@ -818,7 +825,7 @@ function renderSettings() {
   if (currentScope().workspace === 'personal') {
     for (const section of [...root.querySelectorAll('section')]) {
       const title = section.querySelector('h3')?.textContent;
-      if (['Pay estimate', 'Clockify', 'Rules', 'Clockify tags and time codes', 'Clockify project → IFS activity', 'IFS identity'].includes(title)) section.remove();
+      if (['Pay estimate', 'Clockify', 'Time calculation and tags', 'Clockify project → IFS activity', 'IFS identity'].includes(title)) section.remove();
       if (title === 'Expenses') {
         const nodes = [...section.children], index = nodes.findIndex(n => n.tagName === 'H4' && n.textContent === 'Backup and export');
         section.replaceChildren(el('h3', {}, 'Spending preferences'), field('Default currency', defCur), ...(index < 0 ? [] : nodes.slice(index)));
@@ -827,7 +834,7 @@ function renderSettings() {
   }
   // Fold every section; the ones that still need attention start open, the rest remember your choice.
   const c = supabaseClient();
-  const needs = { Clockify: !settings.clockify.apiKey, 'Import and export settings': true, 'Clockify tags and time codes': (settings.timeCodeMappings || []).some(row => !row.confirmed) };
+  const needs = { Clockify: !settings.clockify.apiKey, 'Import and export settings': true, 'Time calculation and tags': true };
   const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Account and sync': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
   for (const sec of root.querySelectorAll('section')) {
     const h3 = sec.querySelector('h3'); if (!h3) continue;
@@ -845,7 +852,10 @@ function renderSettings() {
   const fields = el('div', { class: 'settings-fields', role: 'region', 'aria-label': 'Settings fields', tabindex: '0' });
   while (root.firstChild) fields.append(root.firstChild);
   for (const event of ['input', 'change']) fields.addEventListener(event, e => {
-    if (e.target !== fileInput && e.target !== includeKey) saveStatus.textContent = 'Unsaved changes';
+    if (e.target !== fileInput && e.target !== includeKey) {
+      invalidateClockifyView({ keepMetadata: true });
+      saveStatus.textContent = 'Unsaved changes';
+    }
   });
   root.append(fields, el('div', { class: 'actions settings-save' }, saveBtn, saveStatus));
   if (backupAvailable()) backupMeta().then(m => { const e = $('#pc-backup-state'); if (e) e.textContent = m?.savedAt ? `Last PC backup ${new Date(m.savedAt).toLocaleString()} (${Math.max(1, Math.round(m.bytes / 1024))} KB) in ${m.path}` : 'No PC backup yet.'; });
@@ -853,25 +863,42 @@ function renderSettings() {
 
 // This panel only reads Clockify. Every time-code meaning needs the owner's
 // confirmation, so a bank-style suggestion can never become a payroll rule.
-function renderTimeCodeSettings(s, connection) {
-  // Reference choices from the owner's IFS report-code screenshot (13 Sep 2026).
-  // Availability was shown for one activity; this never changes project mappings.
-  const referenceCodes = [
-    ['F_01', 'Travel Regular Time'], ['F_02', 'Over Time (OT) x 1.5'],
-    ['F_03', 'Regular Time (Normal Calisma)'], ['F_04', 'Ücretli İzin'],
-    ['F_05', 'Ücretsiz İzin'], ['F_06', 'Raporlu'], ['F_07', 'Resmi Tatil'],
-    ['F_08', 'Yıllık İzin'], ['F_10', 'Over Time (OT) x 2'],
-    ['F_11', 'Over Time (ST) x 1'], ['F_12', 'Travel Over Time (ST) x 1']
-  ];
+function renderTimeCodeSettings(s, connection, onModeChange = () => {}) {
+  // Convert the old tag fields into the same editable list. The version marker
+  // prevents removed mappings from reappearing from deprecated settings.tags.
+  const migrated = s.timeCodeMappingsVersion !== 2;
+  s.timeCodeMappings = effectiveTimeCodeMappings(s);
+  s.timeCodeMappingsVersion = 2;
+  s.timeCalculationMode = calculationMode(s);
+  const referenceCodes = TIME_CODE_CATALOG.map(item => [item.code, item.label]);
   let descriptions = new Map();
   const status = el('p', { id: 'time-code-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
   const list = el('datalist', { id: 'clockify-tag-choices' });
   const catalog = el('datalist', { id: 'ifs-time-code-choices' });
   const rows = el('div', { id: 'time-code-rows' });
   const field = (name, input) => el('label', { class: 'field' }, el('span', {}, name), input);
-  const section = el('section', {}, el('h3', {}, 'Clockify tags and time codes'));
+  const section = el('section', {}, el('h3', {}, 'Time calculation and tags'));
+  const controls = el('div', { id: 'time-calculation-controls' });
+  const calculation = el('select', { id: 'time-calculation-mode', 'aria-label': 'Calculate time using' },
+    [['rules', 'Automatic rules'], ['tags', 'Clockify tags']].map(([value, label]) => el('option', { value, selected: s.timeCalculationMode === value }, label)));
+  const modeHelp = el('p', { id: 'time-calculation-help', class: 'help' });
   let request = 0;
-  const edited = () => { if ($('#save-status')) $('#save-status').textContent = 'Unsaved changes'; };
+  const edited = () => { invalidateClockifyView({ keepMetadata: true }); if ($('#save-status')) $('#save-status').textContent = 'Unsaved changes'; };
+  const describeMode = () => {
+    modeHelp.textContent = calculation.value === 'tags'
+      ? 'Each confirmed tag selects its exact IFS code. Untagged or label-only entries use regular time. Rounding still applies; no automatic overtime, travel-by-description, minimum day or paid-rest additions.'
+      : 'Daily hours, weekends and travel thresholds calculate ordinary work. The same tag list supplies overtime/travel meanings. Leave and holiday codes keep their recorded hours on General.';
+  };
+  calculation.addEventListener('change', () => { s.timeCalculationMode = calculation.value; describeMode(); onModeChange(calculation.value); edited(); refresh(); });
+  // These names and meanings were supplied by the owner. Propose them visibly;
+  // preserve existing choices and require Confirm + Save before use.
+  const suggestLeave = row => {
+    if (row.code || row.mode === 'label') return;
+    const code = ({ 'annual leave': 'F_08', holiday: 'F_07' })[(row.tagName || '').trim().toLowerCase()];
+    if (!code) return;
+    row.mode = 'code'; row.code = code; row.description ||= timeCodeInfo(code).description;
+    row.confirmed = false;
+  };
   const refreshCatalog = () => {
     // Preserve the exact description prefix shown in IFS when filling a draft.
     const choices = new Map(referenceCodes.map(([code, label]) => [code, `${code} / ${label}`]));
@@ -886,15 +913,23 @@ function renderTimeCodeSettings(s, connection) {
     const mappings = s.timeCodeMappings || [];
     rows.replaceChildren(...mappings.map((row, index) => {
       const name = el('input', { value: row.tagName || '', list: 'clockify-tag-choices', 'aria-label': `Clockify tag ${index + 1}` });
-      const kind = el('select', { 'aria-label': `Use of tag ${index + 1}` }, [['review', 'Choose meaning…'], ['code', 'Direct IFS time code'], ['label', 'Label only']].map(([value, text]) => el('option', { value, selected: (row.mode || 'review') === value }, text)));
+      const kind = el('select', { 'aria-label': `Use of tag ${index + 1}` }, [['review', 'Choose meaning…'], ['code', 'IFS time code'], ['label', 'Label only']].map(([value, text]) => el('option', { value, selected: (row.mode || 'review') === value }, text)));
       const code = el('input', { value: row.code || '', list: 'ifs-time-code-choices', maxlength: '40', placeholder: 'Copy the code from IFS', 'aria-label': `IFS code ${index + 1}` });
       const description = el('input', { value: row.description || '', placeholder: 'Description shown in IFS', 'aria-label': `IFS description ${index + 1}` });
       const multiplier = el('input', { type: 'number', value: row.payMultiplier ?? '', min: '0', max: '10', step: '0.25', placeholder: 'Unknown', 'aria-label': `Pay multiplier ${index + 1}` });
       const rowStatus = el('span', { class: 'muted', role: 'status' }, row.confirmed ? 'Confirmed' : 'Needs confirmation');
+      const scopeHint = el('small', { class: 'help time-code-scope' });
+      const describeScope = () => {
+        const info = timeCodeInfo(row.code);
+        scopeHint.textContent = row.mode !== 'code' ? '' : info?.scope === 'general-only'
+          ? 'General only · routes to your configured IFS General activity, including entries logged against another mapped Clockify project.'
+          : info ? `Work or General · ${calculation.value === 'tags' ? 'uses this exact code' : 'ordinary work follows automatic rules; F_11 stays exact'}.`
+          : 'This code is outside the supplied IFS lists. Choose one of the 11 documented codes.';
+      };
       let suggestedDescription = row.description === descriptions.get(row.code) ? row.description : '';
       const reset = () => { row.confirmed = false; rowStatus.textContent = 'Needs confirmation'; edited(); };
       name.addEventListener('input', () => { row.tagName = name.value.trim(); row.tagId = (clockifyTags || []).find(tag => tag.name === row.tagName)?.id || ''; reset(); });
-      kind.addEventListener('change', () => { row.mode = kind.value; code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code'; reset(); });
+      kind.addEventListener('change', () => { row.mode = kind.value; code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code'; describeScope(); reset(); });
       code.addEventListener('input', () => {
         row.code = code.value.trim();
         const known = descriptions.get(row.code);
@@ -903,7 +938,7 @@ function renderTimeCodeSettings(s, connection) {
         if (known && (!row.description || row.description === suggestedDescription)) {
           row.description = description.value = known; suggestedDescription = known;
         }
-        reset();
+        describeScope(); reset();
       });
       description.addEventListener('input', () => { row.description = description.value.trim(); reset(); });
       multiplier.addEventListener('input', () => { row.payMultiplier = multiplier.value === '' ? null : Number(multiplier.value); reset(); });
@@ -911,16 +946,20 @@ function renderTimeCodeSettings(s, connection) {
       const confirm = el('button', { class: 'time-code-confirm', onclick: () => {
         assertScopeCurrent();
         if (!row.tagName || !['code', 'label'].includes(row.mode)) { rowStatus.textContent = 'Choose a tag and its meaning first.'; return; }
-        if (row.mode === 'code' && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/.test(row.code || '')) { rowStatus.textContent = 'Enter the actual IFS report code first.'; return; }
+        if (row.mode === 'code' && !timeCodeInfo(row.code)) { rowStatus.textContent = 'Choose an IFS report code from the 11 documented codes first.'; return; }
         if (row.mode === 'code' && row.payMultiplier != null && (!Number.isFinite(row.payMultiplier) || row.payMultiplier < 0 || row.payMultiplier > 10)) { rowStatus.textContent = 'Use a pay multiplier from 0 to 10, or leave it unknown.'; return; }
+        const info = timeCodeInfo(row.code);
+        if (row.mode === 'code' && calculation.value === 'rules' && info?.scope === 'work' && row.code !== 'F_11' && row.payMultiplier != null && row.payMultiplier !== info.payMultiplier) { rowStatus.textContent = 'Automatic rules use the standard work multiplier. Leave this blank, use its standard value, or choose Clockify tags mode for a custom multiplier.'; return; }
         if (mappings.some(other => other !== row && (other.tagName === row.tagName || (row.tagId && other.tagId === row.tagId)))) { rowStatus.textContent = 'This tag has another mapping. Keep one mapping per tag.'; return; }
         row.confirmed = true; rowStatus.textContent = 'Confirmed · Save settings to keep it'; edited();
       } }, 'Confirm meaning');
+      describeScope();
       return el('div', { class: 'time-code-row', style: 'padding:12px 0;border-bottom:1px solid var(--border)' },
         el('div', { class: 'grid3' }, field('Clockify tag', name), field('Use this tag as', kind), field('IFS report code', code), field('IFS description', description), field('Pay multiplier (optional)', multiplier)),
+        scopeHint,
         el('div', { class: 'row' }, confirm, rowStatus, el('button', { class: 'link', onclick: () => { assertScopeCurrent(); s.timeCodeMappings.splice(index, 1); edited(); refresh(); } }, 'Remove mapping')));
     }));
-    if (!mappings.length) rows.append(el('p', { class: 'muted' }, 'Sync tags to review other time codes, or add a tag manually.'));
+    if (!mappings.length) rows.append(el('p', { class: 'muted' }, 'Read your Clockify tags to map their codes, or add a tag manually.'));
   };
   const syncTags = el('button', { id: 'sync-clockify-tags', onclick: async () => {
     const connected = connection(), id = ++request;
@@ -931,34 +970,41 @@ function renderTimeCodeSettings(s, connection) {
       const current = connection();
       if (!scopeIsCurrent() || !section.isConnected || id !== request || current.apiKey !== connected.apiKey || current.enteredKey !== connected.apiKey || current.workspaceId !== connected.workspaceId) return;
       clockifyTags = tags;
-      const legacy = new Set(Object.values(s.tags || {}).filter(Boolean));
       s.timeCodeMappings ||= [];
       let added = 0;
       for (const tag of tags) {
-        const existing = s.timeCodeMappings.find(row => (row.tagId && row.tagId === tag.id) || row.tagName === tag.name);
+        const existing = s.timeCodeMappings.find(row => row.tagId && row.tagId === tag.id)
+          || s.timeCodeMappings.find(row => row.tagName === tag.name);
         if (existing) {
           if (existing.tagId === tag.id && existing.tagName !== tag.name) { existing.tagName = tag.name; existing.confirmed = false; added++; }
+          // A deleted/recreated tag can have the same name and a new identity.
+          // Keep its proposed code, but require a new confirmation before use.
+          if (existing.tagId && existing.tagId !== tag.id) { existing.tagId = tag.id; existing.confirmed = false; added++; }
+          if (!existing.tagId) existing.tagId = tag.id;
+          suggestLeave(existing);
           continue;
         }
-        if (legacy.has(tag.name)) continue;
-        s.timeCodeMappings.push({ tagId: tag.id, tagName: tag.name, mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null }); added++;
+        const draft = { tagId: tag.id, tagName: tag.name, mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null };
+        suggestLeave(draft); s.timeCodeMappings.push(draft); added++;
       }
-      refresh(); if (added) edited();
-      status.textContent = `${tags.length} tags synced. ${added} new or renamed tag${added === 1 ? '' : 's'} need your choice and confirmation. Existing overtime/travel tag fields can now use the same list.`;
+      refresh(); edited();
+      status.textContent = `${tags.length} tags read. ${s.timeCodeMappings.filter(row => !row.confirmed).length} mappings need confirmation. All overtime, travel and leave tags are managed in this list. Save settings to keep changes.`;
     } catch (error) { if (scopeIsCurrent() && section.isConnected && id === request) status.textContent = `Tag sync failed: ${error.message}`; }
     finally { syncTags.disabled = false; }
-  } }, 'Sync Clockify tags');
-  section.append(el('p', { class: 'muted' }, 'Clockify supplies tag names, not IFS codes. Choose what each additional tag means. New or changed meanings need your confirmation before hours can be exported.'),
+  } }, 'Read Clockify tags');
+  section.append(field('Calculate time using', calculation), modeHelp, controls,
+    migrated && s.timeCodeMappings.length ? el('p', { class: 'help' }, 'Your previous overtime/travel tag settings are now in this list. Save settings to keep the unified setup.') : '',
+    el('p', { class: 'muted' }, 'One list for every tag. Reading Clockify only refreshes names; confirm new or changed meanings, then Save settings.'),
     el('div', { class: 'row' }, syncTags, el('button', { id: 'add-time-code', onclick: () => { assertScopeCurrent(); (s.timeCodeMappings ||= []).push({ tagId: '', tagName: '', mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null }); edited(); refresh(); } }, 'Add tag manually')), status,
-    el('p', { class: 'help' }, 'Your IFS list confirms F_07 = Resmi Tatil and F_08 = Yıllık İzin. Choose each tag’s code and confirm its meaning; assignments and pay multipliers are not automatic.'),
+    el('p', { class: 'help' }, 'Annual leave → F_08 / Yıllık İzin. Holiday → F_07 / Resmi Tatil. These and F_04–F_06 use General only. Configure one General activity below; missing or ambiguous destinations block export.'),
     el('details', { class: 'more-opts' }, el('summary', {}, 'IFS code reference · 11 codes'),
-      el('p', { class: 'help' }, 'From your IFS screenshot. Availability can depend on the selected project/activity. Saved descriptions and copied IFS rows take precedence.'),
+      el('p', { class: 'help' }, 'Your IFS lists: normal projects allow six work codes; General also allows the five leave/absence codes. Saved descriptions and copied IFS rows take precedence.'),
       el('table', { class: 'ifs-code-reference' },
-        el('thead', {}, el('tr', {}, el('th', {}, 'Code'), el('th', {}, 'Description'))),
-        el('tbody', {}, referenceCodes.map(([code, label]) => el('tr', {}, el('td', {}, code), el('td', {}, label)))))),
-    el('p', { class: 'help' }, 'Direct codes use the recorded hours with rounding, without weekend overtime or a minimum-day top-up. A day containing direct-code time gets no automatic minimum top-up. An optional pay multiplier affects estimates only; leave it blank when unknown.'), list, catalog, rows);
-  refreshCatalog(); refresh();
-  return { section, refreshCatalog };
+        el('thead', {}, el('tr', {}, el('th', {}, 'Code'), el('th', {}, 'Description'), el('th', {}, 'Where'))),
+        el('tbody', {}, TIME_CODE_CATALOG.map(item => el('tr', {}, el('td', {}, item.code), el('td', {}, item.label), el('td', {}, item.scope === 'general-only' ? 'General only' : 'Work or General')))))),
+    el('p', { class: 'help' }, 'An optional pay multiplier affects estimates only. Work codes use their documented multiplier when blank; leave and holiday pay remain unknown.'), list, catalog, rows);
+  refreshCatalog(); describeMode(); refresh();
+  return { section, refreshCatalog, controls };
 }
 
 function rebuildTemplate(rec) {

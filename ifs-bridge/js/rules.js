@@ -13,6 +13,8 @@
 //    On a weekday, travel beyond the day's threshold (work + travel > 9 h) is F_12;
 //    travel inside the threshold is travel regular time (F_01). Tag "Travel OT" forces F_12.
 
+import { effectiveTimeCodeMappings, calculationMode, timeCodeInfo, completeGeneralActivity } from './time-codes.js';
+
 export const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 // ---- local time helpers ----
@@ -108,22 +110,6 @@ export function roundTo(hours, step, mode = 'nearest') {
   return Math.round(n * step * 100) / 100;
 }
 
-function otClassOf(entry, tags) {
-  const names = (entry.tags || []).map(t => t.name);
-  if (tags.x2 && names.includes(tags.x2)) return 'x2';
-  if (tags.x15 && names.includes(tags.x15)) return 'x15';
-  return 'none';
-}
-
-// 'none' | 'travel' (normal travel) | 'travelOT' (tag forces travel overtime x1)
-function travelClassOf(entry, settings) {
-  const names = (entry.tags || []).map(t => t.name);
-  if (settings.tags.travelOT && names.includes(settings.tags.travelOT)) return 'travelOT';
-  if (settings.tags.travel && names.includes(settings.tags.travel)) return 'travel';
-  if (settings.travelKeyword && new RegExp(`^\\s*${settings.travelKeyword}\\b`, 'i').test(entry.description || '')) return 'travel';
-  return 'none';
-}
-
 // ---- main ----
 //
 // A Clockify description may carry "Short Name: 210701.010101.010101-I" to send
@@ -132,29 +118,42 @@ const SHORT_NAME_RE = /short\s*name\s*:\s*([0-9A-Za-z]+\.[0-9A-Za-z]+\.[0-9A-Za-
 
 // Tags classify time only after the owner confirms their meaning. Clockify names
 // are not IFS report codes; unrelated labels can explicitly be marked Label only.
-export function timeCodeOf(entry, settings) {
+export function timeCodeOf(entry, settings, rules = effectiveTimeCodeMappings(settings)) {
   const tags = (entry.tags || []).map(tag => typeof tag === 'string' ? { name: tag } : tag).filter(Boolean);
   for (const id of entry.tagIds || []) if (!tags.some(tag => tag.id === id)) tags.push({ id });
-  const legacy = new Set(Object.values(settings.tags || {}).filter(Boolean));
-  const rules = settings.timeCodeMappings || [], matched = [];
-  let legacyUsed = false;
+  const matched = [];
   for (const tag of tags) {
-    const matches = rules.filter(rule => (rule.tagId && tag.id && rule.tagId === tag.id) || (rule.tagName && rule.tagName === tag.name));
-    if (!matches.length && legacy.has(tag.name)) { legacyUsed = true; continue; }
-    if (!matches.length) return { error: `Clockify tag "${tag.name || tag.id || 'unknown'}" needs review. In Settings → Clockify tags and time codes, choose an IFS code or Label only and confirm it.` };
+    // A recreated tag is a different tag even if its display name is reused.
+    // Name matching is only the compatibility path for ID-less imported data.
+    const matches = rules.filter(rule => rule && (rule.tagId && tag.id ? rule.tagId === tag.id : rule.tagName && rule.tagName === tag.name));
+    if (!matches.length) return { error: `Clockify tag "${tag.name || tag.id || 'unknown'}" needs review. In Settings → Time calculation and tags, choose an IFS code or Label only and confirm it.` };
     if (matches.length !== 1) return { error: `Clockify tag "${tag.name || tag.id}" has conflicting mappings. Keep one confirmed mapping in Settings.` };
     const rule = matches[0];
+    if (rule.tagId && tag.id && rule.tagId === tag.id && rule.tagName && tag.name && rule.tagName !== tag.name) return { error: `Clockify tag "${rule.tagName}" was renamed to "${tag.name}". Read Clockify tags in Settings → Time calculation and tags, then review and confirm its meaning again.` };
     if (!rule.confirmed || !['code', 'label'].includes(rule.mode)) return { error: `Clockify tag "${tag.name || tag.id}" has not been confirmed. Review its time-code mapping in Settings.` };
-    if (legacy.has(tag.name)) return { error: `Clockify tag "${tag.name}" is assigned to both an overtime/travel rule and another tag mapping. Remove one assignment in Settings.` };
     if (rule.mode === 'label') continue;
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/.test(rule.code || '')) return { error: `Clockify tag "${tag.name || tag.id}" needs a valid IFS report code before exporting.` };
+    if (!timeCodeInfo(rule.code)) return { error: `Clockify tag "${tag.name || tag.id}" needs a supported IFS report code before exporting. Review its mapping in Settings.` };
     if (rule.payMultiplier != null && (!Number.isFinite(rule.payMultiplier) || rule.payMultiplier < 0 || rule.payMultiplier > 10)) return { error: `Clockify tag "${tag.name || tag.id}" has an invalid pay multiplier.` };
     matched.push(rule);
   }
-  if (!matched.length) return {};
-  if (legacyUsed) return { error: 'An entry combines a direct IFS time code with an overtime/travel tag. Review its Clockify tags before exporting.' };
-  if (new Set(matched.map(rule => `${rule.code}|${rule.payMultiplier ?? 'unknown'}`)).size !== 1) return { error: 'An entry has conflicting direct IFS time codes. Keep one intended code before exporting.' };
-  return { directCode: true, code: matched[0].code, description: matched[0].description || '', payMultiplier: matched[0].payMultiplier ?? null };
+  if (new Set(matched.map(rule => `${rule.code}|${rule.payMultiplier ?? timeCodeInfo(rule.code)?.payMultiplier ?? 'unknown'}`)).size > 1) return { error: 'An entry has conflicting IFS time codes. Keep one intended code before exporting.' };
+  const rule = matched[0], codes = settings.codes || {}, tagsOnly = calculationMode(settings) === 'tags';
+  if (!rule && !tagsOnly) {
+    const travelClass = settings.travelKeyword && new RegExp(`^\\s*${settings.travelKeyword}\\b`, 'i').test(entry.description || '') ? 'travel' : 'none';
+    return { ot: 'none', travelClass, travel: travelClass !== 'none' };
+  }
+  const code = rule?.code || (tagsOnly ? 'F_03' : codes.regular || 'F_03'), info = timeCodeInfo(code);
+  if (!info) return { error: `IFS report code "${code}" is not supported for these activities. Review your time rules.` };
+  if (!tagsOnly && info.scope === 'work') {
+    const roles = [['regular', 'none', 'none'], ['ot15', 'x15', 'none'], ['ot2', 'x2', 'none'], ['travelRegular', 'none', 'travel'], ['travel', 'none', 'travelOT']].filter(([key]) => codes[key] === code);
+    if (roles.length > 1) return { error: `IFS code ${code} has more than one automatic time rule. Review the rule codes in Settings.` };
+    if (roles.length) {
+      if (rule.payMultiplier != null && rule.payMultiplier !== info.payMultiplier) return { error: `${code} uses its standard ×${info.payMultiplier} pay multiplier in Rules mode. Clear the custom multiplier or choose Tags mode to use it.` };
+      const [, ot, travelClass] = roles[0]; return { ot, travelClass, travel: travelClass !== 'none' };
+    }
+  }
+  const travelClass = info.scope === 'work' && (tagsOnly ? ['F_01', 'F_12'] : [codes.travelRegular || 'F_01', codes.travel || 'F_12']).includes(code) ? (code === (tagsOnly ? 'F_12' : codes.travel || 'F_12') ? 'travelOT' : 'travel') : 'none';
+  return { directCode: true, timeKind: info.scope, code, description: rule?.description || settings.codeDescriptions?.[code] || info.description, payMultiplier: rule?.payMultiplier ?? info.payMultiplier, ot: 'none', travelClass, travel: travelClass !== 'none' };
 }
 
 export function buildWeek(entries, mondayIso, settings, mapping) {
@@ -164,23 +163,25 @@ export function buildWeek(entries, mondayIso, settings, mapping) {
   const holidays = new Set(settings.holidays || []);
   const warnings = [];
   const byKey = new Map();
+  const tagRules = effectiveTimeCodeMappings(settings);
+  const tagsOnly = calculationMode(settings) === 'tags';
   let codeBlocked = false;
 
   for (const e of entries) {
     if (!e.timeInterval || !e.timeInterval.end) { warnings.push({ level: 'warn', text: `Running timer ignored: "${e.description || ''}" (${e.project?.name || 'no project'})` }); continue; }
     const segs = splitEntry(e, tz);
     if (!segs.some(segment => dayIndex.has(segment.date))) continue;
-    const direct = mapping.some(project => project.clockifyProjectId === (e.projectId || '') && project.kind === 'ignore') ? {} : timeCodeOf(e, settings);
+    const direct = mapping.some(project => project.clockifyProjectId === (e.projectId || '') && project.kind === 'ignore') ? {} : timeCodeOf(e, settings, tagRules);
     if (direct.error) { codeBlocked = true; warnings.push({ level: 'error', text: direct.error }); continue; }
     const title = (e.description || '').split(/\r?\n/)[0];
     if (segs.length > 1) warnings.push({ level: 'info', text: `Entry "${title}" crosses midnight; split into ${segs.map(s => `${s.date} ${(s.minutes / 60).toFixed(2)} h`).join(' + ')}` });
-    const travelClass = direct.directCode ? 'none' : travelClassOf(e, settings);
+    const travelClass = direct.travelClass || 'none';
     const travel = travelClass !== 'none';
     const shortName = (SHORT_NAME_RE.exec(e.description || '') || [])[1] || '';
     for (const s of segs) {
       if (!dayIndex.has(s.date)) continue;
       const pid = e.projectId || '';
-      const ot = otClassOf(e, settings.tags);
+      const ot = direct.ot || 'none';
       const k = `${s.date}|${pid}|${ot}|${travelClass}|${shortName}|${direct.code || ''}|${direct.payMultiplier ?? ''}`;
       const b = byKey.get(k) || { date: s.date, day: dayIndex.get(s.date), projectId: pid, projectName: e.project?.name || '(no project)', ot, travel, travelClass, shortName, ...direct, minutes: 0, first: s.start, entries: [] };
       b.minutes += s.minutes;
@@ -198,12 +199,20 @@ export function buildWeek(entries, mondayIso, settings, mapping) {
   const unmapped = new Map();
 
   const rowFor = (target, code, direct = {}) => {
-    const key = `${target.shortName || target.clockifyProjectId}|${code}|${direct.directCode ? 'direct:' + (direct.payMultiplier ?? 'unknown') : ''}`;
+    const key = `${target.shortName || target.clockifyProjectId}|${code}|${direct.directCode ? `direct:${direct.timeKind}:${direct.payMultiplier ?? 'unknown'}` : ''}`;
     let r = rows.get(key);
-    if (!r) { r = { mapping: target, code, ...(direct.directCode ? { directCode: true, description: direct.description, payMultiplier: direct.payMultiplier } : {}), hours: [0, 0, 0, 0, 0, 0, 0], total: 0 }; rows.set(key, r); }
+    if (!r) { r = { mapping: target, code, ...(direct.directCode ? { directCode: true, timeKind: direct.timeKind, description: direct.description, payMultiplier: direct.payMultiplier } : {}), hours: [0, 0, 0, 0, 0, 0, 0], total: 0 }; rows.set(key, r); }
     return r;
   };
-  const put = (target, code, day, h, direct) => { if (h <= 0) return; const r = rowFor(target, code, direct); r.hours[day] = round2(r.hours[day] + h); r.total = round2(r.total + h); };
+  const problem = text => { codeBlocked = true; warnings.push({ level: 'error', text }); };
+  const put = (target, code, day, h, direct) => {
+    if (h <= 0) return;
+    const info = timeCodeInfo(code);
+    if (!info) { problem(`IFS code "${code}" is not in the supported report-code list. Review Settings before exporting.`); return; }
+    if (target.kind === 'ignore') { problem(`IFS target ${target.shortName || target.clockifyProjectName} is configured as ignored. Choose a mapped activity before exporting.`); return; }
+    if (info.scope === 'general-only' && !completeGeneralActivity(target)) { problem(`${code} can only be exported to a complete General activity. Set its project, subproject, activity, short name and activity sequence in Settings.`); return; }
+    const r = rowFor(target, code, direct); r.hours[day] = round2(r.hours[day] + h); r.total = round2(r.total + h);
+  };
   const travelTarget = m => {
     if (m.travel && m.travel.shortName) return { ...m, ...m.travel, clockifyProjectName: `${m.clockifyProjectName} (travel)` };
     warnings.push({ level: 'warn', text: `${m.clockifyProjectName}: no TRAVEL activity configured; travel hours were put on the main activity. Add it in Settings.` });
@@ -214,37 +223,55 @@ export function buildWeek(entries, mondayIso, settings, mapping) {
   const resolve = b => {
     const base = mapById.get(b.projectId);
     if (!base || base.kind === 'ignore') return { base };
-    if (base.kind === 'general') return { base, m: base, general: true };
     if (b.shortName) {
       const hit = mapping.find(x => x.shortName === b.shortName);
-      if (hit) return { base, m: hit, travel: b.travel };
+      if (hit) return { base, m: hit, general: hit.kind === 'general', travel: b.travel };
       const th = mapping.find(x => x.travel?.shortName === b.shortName);
       if (th) return { base, m: travelTarget(th), travel: true };
       const [p, sp, a] = b.shortName.split('.');
       warnings.push({ level: 'warn', text: `Short Name ${b.shortName} is not in the mapping; exported without ACTIVITY_SEQ and descriptions. Paste one IFS row of it in Settings.` });
-      const isTravelAct = b.travel || /travel/i.test(a || '');
-      return { base, m: { ...base, projectId: p, subProjectId: sp, activityNo: a, activitySeq: '', activityDesc: '', shortName: b.shortName }, travel: isTravelAct };
+      const isTravelAct = b.travel || (!tagsOnly && /travel/i.test(a || ''));
+      // A text override does not establish that the target is General. Only a
+      // configured General mapping may authorize its restricted report codes.
+      return { base, m: { ...base, kind: 'project', projectId: p, subProjectId: sp, activityNo: a, activitySeq: '', activityDesc: '', shortName: b.shortName }, travel: isTravelAct };
     }
+    if (base.kind === 'general') return { base, m: base, general: true };
     return { base, m: b.travel ? travelTarget(base) : base, travel: b.travel };
+  };
+
+  const generalTargets = [...new Map(mapping.filter(completeGeneralActivity).map(target => [[target.projectId, target.subProjectId, target.activityNo, target.activitySeq, target.shortName].join('|'), target])).values()];
+  const directTarget = (b, resolved) => {
+    if (b.timeKind !== 'general-only') return resolved.m;
+    if (completeGeneralActivity(resolved.m)) return resolved.m;
+    if (resolved.base?.kind === 'general') {
+      if (completeGeneralActivity(resolved.base)) return resolved.base;
+      problem(`${b.code}: the originating General mapping is incomplete. Set its project, subproject, activity, short name and activity sequence in Settings.`); return null;
+    }
+    if (generalTargets.length !== 1) {
+      problem(`${b.code} requires ${generalTargets.length ? 'one unambiguous' : 'a complete'} General activity. Configure one valid General project mapping with its activity sequence in Settings before exporting.`); return null;
+    }
+    const target = generalTargets[0];
+    warnings.push({ level: 'info', text: `${b.date}: ${b.code} moved to General activity ${target.shortName}; it is not valid on a normal project.` });
+    return target;
   };
 
   for (let day = 0; day < 7; day++) {
     const todays = buckets.filter(b => b.day === day && b.hours > 0).sort((a, b) => a.first - b.first);
     if (!todays.length) continue;
     const dayType = day === 6 || holidays.has(dates[day]) ? 'sun' : day === 5 ? 'sat' : 'weekday';
-    if (holidays.has(dates[day]) && day < 6) warnings.push({ level: 'info', text: `${dates[day]} is a holiday: ordinary work counts ×2; confirmed direct time codes keep their own code.` });
+    if (!tagsOnly && holidays.has(dates[day]) && day < 6) warnings.push({ level: 'info', text: `${dates[day]} is a holiday: ordinary work counts ×2; confirmed direct time codes keep their own code.` });
 
     let generalHours = 0;
     const work = [], travel = [];
     for (const b of todays) {
       const r = resolve(b);
       if (!r.m) { const bag = r.base ? ignored : unmapped; bag.set(b.projectName, (bag.get(b.projectName) || 0) + b.hours); continue; }
-      if (b.directCode) { put(r.m, b.code, day, b.hours, b); continue; }
-      if (r.general) {
+      if (b.directCode) { const target = directTarget(b, r); if (target) put(target, b.code, day, b.hours, b); continue; }
+      if (r.general && !r.travel && !b.travel) {
         generalHours += b.hours;
-        const code = dayType === 'sun' ? codes.ot2 : dayType === 'sat' ? codes.ot15 : b.ot === 'x2' ? codes.ot2 : codes.regular;
+        const code = dayType === 'sun' || b.ot === 'x2' ? codes.ot2 : dayType === 'sat' || b.ot === 'x15' ? codes.ot15 : codes.regular;
         put(r.m, code, day, b.hours);
-      } else (r.travel ? travel : work).push({ b, m: r.m, base: r.base });
+      } else (r.travel || b.travel ? travel : work).push({ b, m: r.m, base: r.base });
     }
 
     // Regular cap / minimum for the day comes from the first project worked that day.
@@ -271,11 +298,11 @@ export function buildWeek(entries, mondayIso, settings, mapping) {
       workedToday = round2(workedToday + b.hours);
       travelInside = round2(travelInside + inside);
       if (inside > 0) put(m, codes.travelRegular, day, inside);
-      if (b.hours - inside > 0) warnings.push({ level: 'info', text: `${dates[day]}: travel split ${inside} h ${codes.travelRegular} (inside the ${travelAfter} h day) + ${round2(b.hours - inside)} h ${codes.travel}. Tag it "${settings.tags.travelOT}" to force all of it to ${codes.travel}.` });
+      if (b.hours - inside > 0) warnings.push({ level: 'info', text: `${dates[day]}: travel split ${inside} h ${codes.travelRegular} (inside the ${travelAfter} h day) + ${round2(b.hours - inside)} h ${codes.travel}. A confirmed tag for ${codes.travel} forces all of it to that code.` });
       put(m, codes.travel, day, round2(b.hours - inside));
     }
     // Minimum day: IFS expects at least the regular hours on a worked weekday (8 abroad, 9 in TR).
-    if (settings.topUpMinimum !== false && dayType === 'weekday' && lead && !todays.some(b => b.directCode)) {
+    if (!tagsOnly && settings.topUpMinimum !== false && dayType === 'weekday' && lead && !todays.some(b => b.directCode)) {
       const booked = round2(cap - regularLeft + travelInside);
       if (booked < cap) {
         const topUp = round2(cap - booked);
