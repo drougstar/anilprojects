@@ -220,10 +220,14 @@ export function normalizeMapping(mapping) {
   return mapping;
 }
 
-export function saveSettings(s) {
+export function saveSettings(s, { strict = false } = {}) {
   assertScopeCurrent();
   normalizeMapping(s.mapping || []);
-  try { localStorage.setItem(scopedKey(KEY), JSON.stringify({ ...s, supabase: getConnection() })); } catch { /* private mode etc. */ }
+  try { localStorage.setItem(scopedKey(KEY), JSON.stringify({ ...s, supabase: getConnection() })); }
+  catch {
+    if (strict) throw Error('Browser storage is unavailable or full. Settings were not saved.');
+    return;
+  }
   document.dispatchEvent(new CustomEvent('ifsbridge:changed', { detail: { store: 'settings' } }));
 }
 

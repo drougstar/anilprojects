@@ -4,8 +4,9 @@ import { Clockify } from './clockify.js';
 import { buildWeek, mondayOf, fetchWindow, DAYS, localToUtc, utcToLocalInput } from './rules.js';
 import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber, activityFromRecord, identityFromRecord } from './ifs.js';
 import { loadSettings, saveSettings, DEFAULTS, defaultsForScope } from './store.js';
+import { createSettingsFile, parseSettingsFile } from './settings-transfer.js';
 import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, showExpenseAttention } from './expenses.js';
-import { el, $, confirmButton, toast, openDialog, field as dlgField } from './dom.js';
+import { el, $, confirmButton, toast, openDialog, download, field as dlgField } from './dom.js';
 import { initLocalBackup, backupAvailable, backupMeta, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
 import { allWeeks, weekRecord, markWeekEntered, unmarkWeek, diffRows, recentMondays, shiftIso } from './week-status.js';
@@ -21,6 +22,7 @@ let clockifyProjects = null;
 let weekEntries = [];      // raw Clockify entries of the loaded week (for the editor)
 let clockifyMeta = null;   // { projects, tags } for the entry dialog
 let clockifyConnectId = 0;
+let settingsImportUndo = null;
 
 function invalidateClockifyView() {
   // An in-flight request or cached editor must not bring the previous account back.
@@ -490,6 +492,79 @@ function renderSettings() {
   const field = (label, input, hint) => el('label', { class: 'field' }, el('span', {}, label), input, hint ? el('small', {}, hint) : null);
   const txt = (value, attrs = {}) => el('input', { type: 'text', value: value ?? '', ...attrs });
 
+  // A portable file contains this space's preferences, never records or a login session.
+  const workspace = currentScope().workspace;
+  const spaceName = workspace === 'personal' ? 'Personal' : 'Work';
+  const transferStatus = el('p', { id: 'settings-transfer-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
+  const includeKey = el('input', { type: 'checkbox', id: 'settings-include-key' });
+  const fileInput = el('input', { type: 'file', id: 'settings-file', accept: '.json,application/json', hidden: true });
+  let importRequest = 0;
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0], request = ++importRequest;
+    fileInput.value = ''; // Choosing the same file again must still fire change.
+    if (!file) return;
+    transferStatus.textContent = 'Reading settings…';
+    try {
+      assertScopeCurrent();
+      if (file.size > 1024 * 1024) throw Error('Choose a settings JSON file smaller than 1 MB.');
+      const text = await file.text();
+      if (!scopeIsCurrent() || request !== importRequest || !root.contains(fileInput)) return;
+      const previous = collectSettings();
+      const imported = parseSettingsFile(text, { workspace, current: previous });
+      transferStatus.textContent = '';
+      const error = el('p', { id: 'settings-import-error', role: 'status', 'aria-live': 'polite', class: 'muted' });
+      const included = workspace === 'personal'
+        ? 'Currencies, categories and spending preferences.'
+        : 'Clockify rules, IFS identity and project mappings, row templates, pay and expense preferences.';
+      const preview = el('div', {},
+        el('p', {}, `Import into your ${spaceName} space on this browser.`),
+        el('p', { class: 'muted' }, included),
+        el('p', {}, `${imported.summary.fieldCount} settings · ${imported.summary.categoryCount} categories${workspace === 'work' ? ` · ${imported.summary.mappingCount} project mapping${imported.summary.mappingCount === 1 ? '' : 's'}` : ''}`),
+        el('p', { class: 'muted' }, 'Settings included in the file replace their current values. Expenses, timesheets and sign-in stay as they are.'),
+        workspace === 'work' ? el('p', {}, imported.includesApiKey ? 'Clockify API key included. The imported key will be used next time you connect.' : 'No Clockify API key included. Your current key is kept.') : null,
+        error);
+      const dialog = openDialog('Import settings', preview);
+      preview.append(el('div', { class: 'actions' },
+        el('button', { id: 'settings-apply', class: 'primary', onclick: () => {
+          try {
+            assertScopeCurrent();
+            // Persist first: a full/blocked browser store must not pretend the import worked.
+            saveSettings(imported.settings, { strict: true });
+            settingsImportUndo = previous;
+            settings = imported.settings;
+            ++clockifyConnectId; invalidateClockifyView();
+            dialog.close(); renderSettings();
+            $('#settings-transfer-status').textContent = 'Settings imported. You can undo this import below.';
+            $('#save-status').textContent = 'Settings imported.';
+            toast('Settings imported');
+          } catch (err) { if (scopeIsCurrent()) error.textContent = `Import failed: ${err.message}`; }
+        } }, 'Apply settings'),
+        el('button', { onclick: () => dialog.close() }, 'Cancel')));
+    } catch (err) { if (scopeIsCurrent()) transferStatus.textContent = `Import failed: ${err.message}`; }
+  });
+  root.append(el('section', {}, el('h3', {}, 'Import and export settings'),
+    el('p', { class: 'muted' }, `Save your ${spaceName} setup to a file, then import it on your phone or another browser. The export includes your current edits.`),
+    workspace === 'work' ? el('label', { class: 'field check' }, el('span', { class: 'row' }, includeKey, 'Include Clockify API key'), el('small', {}, 'The key is readable in the file. Keep that copy private.')) : null,
+    el('div', { class: 'row' },
+      el('button', { id: 'settings-export', onclick: () => {
+        try {
+          assertScopeCurrent();
+          const payload = createSettingsFile(collectSettings(), { workspace, includeApiKey: workspace === 'work' && includeKey.checked });
+          download(`ifsbridge-${workspace}-settings-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json');
+          transferStatus.textContent = 'Settings file downloaded. Import it in the same space on your other device.';
+        } catch (err) { if (scopeIsCurrent()) transferStatus.textContent = `Export failed: ${err.message}`; }
+      } }, 'Export settings'),
+      el('button', { id: 'settings-import', onclick: () => { if (scopeIsCurrent()) fileInput.click(); } }, 'Import settings…'),
+      settingsImportUndo ? el('button', { id: 'settings-undo-import', class: 'link', onclick: () => {
+        try {
+          assertScopeCurrent(); saveSettings(settingsImportUndo, { strict: true });
+          settings = settingsImportUndo; settingsImportUndo = null;
+          ++clockifyConnectId; invalidateClockifyView(); renderSettings();
+          $('#settings-transfer-status').textContent = 'Previous settings restored.';
+          $('#save-status').textContent = 'Saved.';
+        } catch (err) { if (scopeIsCurrent()) transferStatus.textContent = `Undo failed: ${err.message}`; }
+      } }, 'Undo last import') : null), fileInput, transferStatus));
+
   // Appearance
   const themeBtns = ['auto', 'light', 'dark'].map(m => el('button', { class: 'chip' + (currentTheme() === m ? ' on' : ''), onclick: e => { applyTheme(m); for (const b of themeBtns) b.classList.toggle('on', b === e.currentTarget); } }, m === 'auto' ? 'Follow system' : m === 'light' ? 'Light' : 'Dark'));
   root.append(el('section', {}, el('h3', {}, 'Appearance'), el('div', { class: 'theme-pick' }, themeBtns), el('small', { class: 'help' }, 'Applies on this device only.')));
@@ -682,15 +757,33 @@ function renderSettings() {
       field('Name', txt(idn.resourceName, { oninput: e => { idn.resourceName = e.target.value; } })),
       field('Time zone', txt(s.timeZone, { oninput: e => { s.timeZone = e.target.value.trim(); } })))));
 
+  // Some fields update the draft on input; collect the deferred controls too, without saving.
+  function collectSettings() {
+    const next = structuredClone(s), apiKey = key.value.trim();
+    if (apiKey !== next.clockify.apiKey) next.clockify = { ...next.clockify, apiKey, userId: '', workspaceId: '', userName: '' };
+    next.regularHours = Number(reg.value) || 9; next.travelAfterHours = Number(trAfter.value) || next.regularHours;
+    next.roundStep = Number(step.value) || 0.5; next.roundMode = mode.value; next.topUpMinimum = topUp.checked;
+    next.holidays = hol.value.split(/[\s,;]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+    next.tags = { x15: t15.value.trim(), x2: t2.value.trim(), travel: tTr.value.trim(), travelOT: tTrOT.value.trim() }; next.travelKeyword = kw.value.trim();
+    next.codes = { regular: cReg.value.trim(), ot15: c15.value.trim(), ot2: c2.value.trim(), travel: cTr.value.trim(), travelRegular: cTrR.value.trim() };
+    next.codeDescriptions = { ...next.codeDescriptions, [next.codes.regular]: dReg.value, [next.codes.ot15]: d15.value, [next.codes.ot2]: d2.value, [next.codes.travel]: dTr.value, [next.codes.travelRegular]: dTrR.value };
+    return next;
+  }
   const saveBtn = el('button', { class: 'primary', onclick: () => {
-    changeClockifyKey(key.value.trim());
-    settings.regularHours = Number(reg.value) || 9; settings.travelAfterHours = Number(trAfter.value) || settings.regularHours;
-    settings.roundStep = Number(step.value) || 0.5; settings.roundMode = mode.value; settings.topUpMinimum = topUp.checked;
-    settings.holidays = hol.value.split(/[\s,;]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
-    settings.tags = { x15: t15.value.trim(), x2: t2.value.trim(), travel: tTr.value.trim(), travelOT: tTrOT.value.trim() }; settings.travelKeyword = kw.value.trim();
-    settings.codes = { regular: cReg.value.trim(), ot15: c15.value.trim(), ot2: c2.value.trim(), travel: cTr.value.trim(), travelRegular: cTrR.value.trim() };
-    settings.codeDescriptions = { ...settings.codeDescriptions, [settings.codes.regular]: dReg.value, [settings.codes.ot15]: d15.value, [settings.codes.ot2]: d2.value, [settings.codes.travel]: dTr.value, [settings.codes.travelRegular]: dTrR.value };
-    assertScopeCurrent(); saveSettings(settings); saveStatus.textContent = 'Saved.';
+    try {
+      assertScopeCurrent();
+      const next = collectSettings();
+      saveSettings(next, { strict: true });
+      changeClockifyKey(next.clockify.apiKey);
+      // Mapping and identity inputs retain references to these objects after Save.
+      next.mapping.forEach((value, index) => {
+        const row = settings.mapping[index], travel = row.travel;
+        Object.assign(row, value);
+        if (travel && value.travel) { Object.assign(travel, value.travel); row.travel = travel; }
+      });
+      Object.assign(settings, next, { identity: settings.identity, mapping: settings.mapping });
+      saveStatus.textContent = 'Saved.';
+    } catch (err) { if (scopeIsCurrent()) saveStatus.textContent = `Save failed: ${err.message}`; }
   } }, 'Save settings');
   const resetBtn = confirmButton(currentScope().workspace === 'personal' ? 'Reset spending preferences' : 'Reset rules and mapping to defaults', () => { const keep = { clockify: settings.clockify, supabase: settings.supabase }; settings = { ...defaultsForScope(), ...keep }; saveSettings(settings); renderSettings(); toast('Defaults restored. Keys kept.'); }, { armedLabel: 'Reset? Tap again to confirm', className: 'link' });
   const saveStatus = el('span', { id: 'save-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
@@ -708,7 +801,7 @@ function renderSettings() {
   }
   // Fold every section; the ones that still need attention start open, the rest remember your choice.
   const c = supabaseClient();
-  const needs = { Clockify: !settings.clockify.apiKey };
+  const needs = { Clockify: !settings.clockify.apiKey, 'Import and export settings': true };
   const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Account and sync': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
   for (const sec of root.querySelectorAll('section')) {
     const h3 = sec.querySelector('h3'); if (!h3) continue;
@@ -725,7 +818,9 @@ function renderSettings() {
   // Give Save its own space below the scrolling fields, so it never covers a fold.
   const fields = el('div', { class: 'settings-fields', role: 'region', 'aria-label': 'Settings fields', tabindex: '0' });
   while (root.firstChild) fields.append(root.firstChild);
-  for (const event of ['input', 'change']) fields.addEventListener(event, () => { saveStatus.textContent = 'Unsaved changes'; });
+  for (const event of ['input', 'change']) fields.addEventListener(event, e => {
+    if (e.target !== fileInput && e.target !== includeKey) saveStatus.textContent = 'Unsaved changes';
+  });
   root.append(fields, el('div', { class: 'actions settings-save' }, saveBtn, saveStatus));
   if (backupAvailable()) backupMeta().then(m => { const e = $('#pc-backup-state'); if (e) e.textContent = m?.savedAt ? `Last PC backup ${new Date(m.savedAt).toLocaleString()} (${Math.max(1, Math.round(m.bytes / 1024))} KB) in ${m.path}` : 'No PC backup yet.'; });
 }
@@ -737,7 +832,7 @@ function rebuildTemplate(rec) {
 // ---------- boot ----------
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
-  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settings = null; } });
+  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settings = null; settingsImportUndo = null; } });
   if (!admitted) return;
   settings = loadSettings();
   const navigation = document.querySelector('.top');
