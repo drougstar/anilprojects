@@ -4,6 +4,8 @@ import { DEFAULT_CONNECTION } from './site-config.js';
 const CONNECTION = 'ifsbridge.connection.v1';
 const LEGACY_SETTINGS = 'ifsbridge.settings.v1';
 const LEGACY_SESSION = 'ifsbridge.supabase.session';
+const VISIT_RELOAD = 'ifsbridge.visit.reload.v1';
+const VISIT_RELOAD_MAX_AGE = 30000;
 const get = key => { try { return globalThis.localStorage?.getItem(key) || null; } catch { return null; } };
 const read = key => { try { return JSON.parse(get(key) || 'null'); } catch { return null; } };
 const put = (key, value) => {
@@ -48,7 +50,7 @@ export function sessionExpiresAt(session) {
   return 0;
 }
 
-export function savedSessionFor(url) {
+function storedSessionFor(url) {
   const key = sessionKeyFor(url), direct = read(key);
   if (direct) return direct;
   // Import the old session only for its original backend, once. Never move data.
@@ -66,9 +68,9 @@ export function savedSessionFor(url) {
   return null;
 }
 
-function derive() {
+function deriveStored() {
   const backend = getConnection().url;
-  const session = backend ? savedSessionFor(backend) : null;
+  const session = backend ? storedSessionFor(backend) : null;
   const userId = session?.access_token && session?.user?.id ? String(session.user.id) : null;
   const accountKey = userId ? `account.${encodeURIComponent(backend)}.${encodeURIComponent(userId)}` : 'guest';
   const workspace = get(`ifsbridge.workspace.${accountKey}`) === 'personal' ? 'personal' : 'work';
@@ -77,13 +79,77 @@ function derive() {
   return { accountKey, workspace, key: `${accountKey}.${workspace}`, userId, backend, legacy, generation };
 }
 
-const SCOPE = Object.freeze(derive());
+// Each document starts closed. Only an intentional app reload gets a short-lived,
+// single-use continuation; browser refresh, a new tab and a later visit do not.
+function consumeVisitReload() {
+  let ticket;
+  try {
+    const raw = globalThis.sessionStorage?.getItem(VISIT_RELOAD);
+    globalThis.sessionStorage?.removeItem(VISIT_RELOAD);
+    ticket = JSON.parse(raw || 'null');
+  } catch { return false; }
+  if (!ticket || typeof ticket !== 'object' || typeof ticket.nonce !== 'string' || !ticket.nonce) return false;
+  const active = deriveStored();
+  const proofKey = active.backend ? sessionKeyFor(active.backend) + '.visit-reload' : '';
+  const proofMatches = !!proofKey && get(proofKey) === ticket.nonce;
+  if (proofMatches) {
+    try { localStorage.removeItem(proofKey); } catch { return false; }
+  }
+  const age = Date.now() - Number(ticket.at);
+  const navigation = globalThis.performance?.getEntriesByType?.('navigation')?.[0]?.type;
+  return proofMatches && navigation === 'reload' && Number.isFinite(age) && age >= 0 && age <= VISIT_RELOAD_MAX_AGE &&
+    !!active.userId && sessionExpiresAt(storedSessionFor(active.backend)) > Date.now() &&
+    ticket.backend === active.backend && ticket.userId === active.userId &&
+    ticket.generation === active.generation && ticket.workspace === active.workspace;
+}
+
+let visitAdmitted = consumeVisitReload(), freshSignIn = null, revision = 0;
+const initial = deriveStored();
+const SCOPE = Object.freeze(visitAdmitted ? initial : {
+  accountKey: 'guest', workspace: 'work', key: 'guest.work', userId: null,
+  backend: initial.backend, legacy: true, generation: initial.generation
+});
 let pageLocked = false;
 export const currentScope = () => SCOPE;
 export const scopedKey = base => SCOPE.legacy ? base : `${base}.scope.${SCOPE.key}`;
+export const visitRevision = () => revision;
+export function assertVisitRevision(expected) {
+  if (revision !== expected) throw Error('This visit ended. Sign in again to continue.');
+}
+export function savedSessionFor(url) {
+  let backend;
+  try { backend = cleanUrl(url); } catch { return null; }
+  if (!((visitAdmitted && !pageLocked && backend === SCOPE.backend) || freshSignIn?.backend === backend)) return null;
+  return storedSessionFor(backend);
+}
+export function admitFreshSignIn(url) {
+  const active = deriveStored();
+  if (cleanUrl(url) !== active.backend || !active.userId || sessionExpiresAt(storedSessionFor(active.backend)) <= Date.now())
+    throw Error('Sign in again to continue.');
+  freshSignIn = { backend: active.backend, userId: active.userId, generation: active.generation };
+}
+export function prepareVisitReload() {
+  const active = deriveStored();
+  const sameIdentity = expected => expected && expected.backend === active.backend && expected.userId === active.userId && expected.generation === active.generation;
+  if (!active.userId || sessionExpiresAt(storedSessionFor(active.backend)) <= Date.now() ||
+      !(sameIdentity(freshSignIn) || (visitAdmitted && !pageLocked && sameIdentity(SCOPE))))
+    throw Error('Sign in again to open this space.');
+  const nonce = `${Date.now()}.${Math.random().toString(36).slice(2)}.${Math.random().toString(36).slice(2)}`;
+  const ticket = { backend: active.backend, userId: active.userId, generation: active.generation, workspace: active.workspace, at: Date.now(), nonce };
+  const proofKey = sessionKeyFor(active.backend) + '.visit-reload';
+  put(proofKey, nonce);
+  try {
+    if (!globalThis.sessionStorage) throw Error('Unavailable');
+    globalThis.sessionStorage.setItem(VISIT_RELOAD, JSON.stringify(ticket));
+  } catch {
+    try { if (get(proofKey) === nonce) localStorage.removeItem(proofKey); } catch {}
+    throw Error('Browser storage is unavailable. Allow site storage before signing in.');
+  }
+  return true;
+}
 export function scopeIdentityIsCurrent() {
-  const active = derive();
-  return !pageLocked && active.key === SCOPE.key && active.backend === SCOPE.backend && active.generation === SCOPE.generation;
+  const active = deriveStored();
+  return visitAdmitted && !pageLocked && active.key === SCOPE.key && active.backend === SCOPE.backend && active.generation === SCOPE.generation;
 }
 export function assertScopeIdentityCurrent() {
   if (!scopeIdentityIsCurrent()) throw Error('Account or workspace changed. Reload this tab before continuing.');
@@ -92,10 +158,14 @@ export function scopeIsCurrent() {
   return !!SCOPE.userId && scopeIdentityIsCurrent() && sessionExpiresAt(savedSessionFor(SCOPE.backend)) > Date.now();
 }
 export function assertScopeCurrent() {
+  if (!SCOPE.userId) throw Error('Sign in to open your records. Your local records are still saved.');
   assertScopeIdentityCurrent();
   if (!scopeIsCurrent()) throw Error('Sign in to open your records. Your local records are still saved.');
 }
 export function lockScope() {
+  ++revision;
+  visitAdmitted = false;
+  freshSignIn = null;
   pageLocked = true;
 }
 export function selectWorkspace(value) {

@@ -1,5 +1,5 @@
 // Small fetch client. Every data request belongs to the page's frozen scope.
-import { currentScope, assertScopeCurrent, assertScopeIdentityCurrent, sessionKeyFor, savedSessionFor, sessionExpiresAt, rotateSessionGeneration, notifySessionChanged, lockScope } from './scope.js';
+import { currentScope, assertScopeCurrent, assertScopeIdentityCurrent, sessionKeyFor, savedSessionFor, sessionExpiresAt, rotateSessionGeneration, notifySessionChanged, lockScope, visitRevision, assertVisitRevision, admitFreshSignIn } from './scope.js';
 const SCOPED_TABLES = ['sheets', 'trips', 'expenses', 'weeks', 'templates', 'budgets', 'inbox'];
 const refreshing = new Map();
 export class Supabase {
@@ -23,6 +23,7 @@ export class Supabase {
     localStorage.setItem(key + '.migrated', '1');
     if (!s || newSession) rotateSessionGeneration(this.url);
     notifySessionChanged();
+    if (s && newSession) admitFreshSignIn(this.url);
   }
   async auth(path, body) {
     const res = await fetch(this.url + '/auth/v1/' + path, { method: 'POST', headers: { apikey: this.anonKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -31,12 +32,16 @@ export class Supabase {
     return data;
   }
   async signUp(email, password) {
+    const revision = visitRevision();
     const d = await this.auth('signup', { email, password });
+    assertVisitRevision(revision);
     if (d.access_token) { this.saveSession({ ...d, expires_at: Date.now() + d.expires_in * 1000 }, { newSession: true }); return 'signed-in'; }
     return 'confirm-email';
   }
   async signIn(email, password) {
+    const revision = visitRevision();
     const d = await this.auth('token?grant_type=password', { email, password });
+    assertVisitRevision(revision);
     this.saveSession({ ...d, expires_at: Date.now() + d.expires_in * 1000 }, { newSession: true });
   }
   signOut() {

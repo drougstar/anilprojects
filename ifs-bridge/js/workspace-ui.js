@@ -1,5 +1,5 @@
 import { el, $, field, openDialog, toast } from './dom.js';
-import { currentScope, scopedKey, selectWorkspace, getConnection, setConnection, scopeIsCurrent, scopeIdentityIsCurrent, assertScopeCurrent, lockScope, savedSessionFor, sessionExpiresAt } from './scope.js';
+import { currentScope, scopedKey, selectWorkspace, getConnection, setConnection, scopeIsCurrent, scopeIdentityIsCurrent, assertScopeCurrent, lockScope, savedSessionFor, sessionExpiresAt, prepareVisitReload } from './scope.js';
 import { Supabase } from './supabase.js';
 import { db, live, listHistory, undoChange } from './db.js';
 import { sync, checkSetup, listConflicts, resolveConflict } from './sync.js';
@@ -7,13 +7,17 @@ import { rateFor, fmtMoney } from './expense-ifs.js';
 import { mondayOf } from './rules.js';
 
 let ctx;
-const reload = () => {
+const reload = ({ continueVisit = false } = {}) => {
+  if (pageDeparted) return;
+  // Only a completed sign-in or the workspace picker can carry this visit across a reload.
+  if (continueVisit) prepareVisitReload();
   if (privateViewOpened && !scopeIdentityIsCurrent()) lockPrivateView('Opening the selected account or workspace…');
   location.reload();
 };
 const textInput = (value = '', options = {}) => el('input', { value, ...options });
 
 let authTimer, authExpiryTimer, checkingSession = false, privateViewOpened = false, onAuthLock;
+let pageDeparted = false, authActionId = 0;
 
 function signedOutScreen(message = '') {
   clearTimeout(authTimer);
@@ -84,16 +88,11 @@ export async function initAuthGate({ onLock } = {}) {
   window.addEventListener('focus', checkSession);
   window.addEventListener('online', checkSession);
   window.addEventListener('pagehide', () => {
-    if (!privateViewOpened) return;
-    // A browser back/forward snapshot must not remember a visible ledger.
-    document.documentElement.dataset.auth = 'locked';
-    for (const node of document.querySelectorAll('.top, #main-content')) { node.hidden = true; node.inert = true; }
-    if ($('#auth-screen')) { $('#auth-screen').hidden = false; $('#auth-screen').replaceChildren(el('p', { role: 'status' }, 'Checking sign in…')); }
+    pageDeparted = true; ++authActionId;
+    // Clear private DOM before a back/forward snapshot is stored. Returning is a new visit.
+    lockPrivateView('Sign in again to open your records.');
   });
-  window.addEventListener('pageshow', async () => {
-    await checkSession();
-    if (privateViewOpened && scopeIsCurrent()) revealPrivateApp();
-  });
+  window.addEventListener('pageshow', () => { pageDeparted = false; });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkSession(); });
   // A suspended/background tab can receive input before its timer runs.
   for (const type of ['click', 'submit', 'input', 'change']) document.addEventListener(type, event => {
@@ -125,7 +124,7 @@ export function initWorkspaceUI(context) {
   const picker = $('#workspace-select');
   if (picker) {
     picker.value = currentScope().workspace;
-    picker.addEventListener('change', () => { selectWorkspace(picker.value); reload(); });
+    picker.addEventListener('change', () => { selectWorkspace(picker.value); reload({ continueVisit: true }); });
   }
   $('#account-button')?.addEventListener('click', () => openDialog('Account', accountPanel()));
   // Other windows follow the selected account/space before showing any new data.
@@ -171,12 +170,18 @@ export function accountPanel({ signedOut = false } = {}) {
       return [email.value.trim(), password.value];
     };
     box.append(field('Email', email), field('Password', password), el('div', { class: 'row' },
-      button('Sign in', async () => { await c.signIn(...credentials()); reload(); }, 'primary'),
+      button('Sign in', async () => {
+        const request = authActionId;
+        await c.signIn(...credentials());
+        if (request === authActionId) reload({ continueVisit: true });
+      }, 'primary'),
       button('Create account', async () => {
+        const request = authActionId;
         const result = await c.signUp(...credentials());
+        if (request !== authActionId || pageDeparted) return;
         if (result === 'confirm-email') status.textContent = 'Check your confirmation email, then sign in here.';
-        else reload();
-      })), el('p', { class: 'help' }, 'Signing in opens that account’s records. Existing local Work records remain on this device and are not uploaded automatically.'));
+        else reload({ continueVisit: true });
+      })), el('p', { class: 'help' }, 'Sign in for each visit. Opening or refreshing the site asks again; your saved settings and records stay on this device.'));
   } else {
     box.append(el('div', { class: 'row' },
       button('Sync now', async () => {
