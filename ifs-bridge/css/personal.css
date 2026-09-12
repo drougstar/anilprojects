@@ -1,5 +1,5 @@
 /* Personal spending keeps its monthly analysis independent of Work's sheet layout. */
-body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #tab-expenses{max-width:1120px;margin-inline:auto}
+body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #tab-expenses,body[data-workspace="personal"] #tab-study{max-width:1120px;margin-inline:auto}
 .personal-page{min-width:0}
 .personal-toolbar{margin:0 0 14px}
 .personal-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -59,8 +59,19 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
 .personal-entry>.amt{font-size:13px;font-weight:500}
 .personal-edit-hint{font-size:18px;color:var(--ink-3)}
 .personal-refund{color:var(--ok)}
-.personal-filters{display:grid;grid-template-columns:minmax(180px,2fr) repeat(3,minmax(120px,1fr));gap:8px}
+.personal-filters{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;margin-top:10px}
 .personal-filters>*{font-size:13px;min-width:0}
+.personal-filter{display:flex;flex-direction:column;gap:4px;min-width:0}
+.personal-filter>span{font-size:12px;color:var(--ink-3)}
+.personal-filter>input,.personal-filter>select{width:100%;min-width:0}
+.personal-filter-panel{padding:10px 12px;background:var(--surface);border:1px solid var(--rule);border-radius:9px}
+.personal-filter-panel>summary{font-size:13px;font-weight:600;cursor:pointer}
+.personal-shared-filters{margin-bottom:16px}
+.personal-filter-state>span{flex:1 1 100%}
+.account-security-status{border-left:3px solid var(--accent);padding:4px 12px;margin:14px 0}
+.account-security-status p{margin:4px 0}
+.connection-status-panel{margin:14px 0;padding:12px;border:1px solid var(--rule);border-radius:8px}
+.connection-status-panel small{display:block;margin-top:8px}
 .personal-filter-state{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:12px 0 4px;color:var(--ink-3);font-size:12px}
 .personal-filter-state button{font-size:12px}
 .personal-filter-chip{padding:2px 8px;min-height:28px;background:var(--accent-soft)}
@@ -77,15 +88,10 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
   .personal-metrics{grid-template-columns:1fr 1fr;gap:8px}.personal-metric.primary-metric{grid-column:1/-1}.personal-metric{padding:12px 14px}.personal-metric strong{font-size:21px}.personal-metric.primary-metric strong{font-size:29px}
   .personal-breakdowns{grid-template-columns:1fr;gap:0}.personal-panel{padding:13px}.personal-comparison{padding:11px 1px}.personal-comparison small{flex-basis:100%}
   .personal-entry{grid-template-columns:42px minmax(0,1fr) auto;gap:8px}.personal-entry>.amt{font-size:12px}.personal-edit-hint{display:none}.personal-entry-date{font-size:11px}
-  .personal-filters{grid-template-columns:1fr 1fr}.personal-filters input[type=search]{grid-column:1/-1}.personal-filters select:last-child{grid-column:1/-1}.personal-panel-head button{max-width:100%}
+  .personal-filters{grid-template-columns:1fr 1fr}.personal-filters>.personal-filter:first-child{grid-column:1/-1}.personal-panel-head button{max-width:100%}
 }
 /* Keep an amount intact; large values may scroll inside their own card. */
 .personal-metric strong{white-space:nowrap;overflow-x:auto;max-width:100%;overflow-wrap:normal}
 @media(max-width:760px){.personal-metric strong{font-size:clamp(15px,4.3vw,21px)}.personal-metric.primary-metric strong{font-size:29px}}
-/* Keep the monthly modes compact, with room to wrap on a phone. */
-.personal-views { display:flex; flex-wrap:wrap; gap:4px; margin:8px 0; }
-.personal-views button { padding:6px 12px; }
-.personal-views button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
-
 .personal-toolbar-actions{flex-wrap:wrap}.personal-toolbar-actions>button{white-space:nowrap;flex-shrink:0}
 @media(max-width:760px){.personal-toolbar-actions>.primary{flex:0 0 auto}}

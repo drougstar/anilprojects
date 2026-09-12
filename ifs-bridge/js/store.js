@@ -179,13 +179,20 @@ export function loadSettings() {
       codeDescriptions: { ...DEFAULTS.codeDescriptions, ...(s.codeDescriptions || {}) },
       identity: { ...defaults.identity, ...(s.identity || {}) },
       holidays: Array.isArray(s.holidays) ? s.holidays : [],
-      mapping: currentScope().legacy ? mergeMapping(s.mapping || []) : (Array.isArray(s.mapping) ? s.mapping : []),
+      mapping: currentScope().legacy && s.settingsListsVersion !== 2 ? mergeMapping(s.mapping || []) : (Array.isArray(s.mapping) ? s.mapping : []),
     };
     // Lists that newer versions may extend: keep the user's entries, add unknown defaults.
-    merged.expenseCodes = mergeById(defaults.expenseCodes, s.expenseCodes, 'code');
-    merged.currencies = [...new Set([...(s.currencies || []), ...defaults.currencies])];
-    merged.costObjects = [...new Set([...(s.costObjects || []), ...defaults.costObjects])];
-    merged.knownShortNames = [...new Set([...(s.knownShortNames || []), ...defaults.knownShortNames])];
+    // Lists explicitly saved by the editor are authoritative. Otherwise a
+    // removed category, project or cost object would return on the next visit.
+    if (s.settingsListsVersion === 2) {
+      for (const key of ['expenseCodes', 'currencies', 'costObjects', 'knownShortNames'])
+        merged[key] = Array.isArray(s[key]) ? structuredClone(s[key]) : structuredClone(defaults[key] || []);
+    } else {
+      merged.expenseCodes = mergeById(defaults.expenseCodes, s.expenseCodes, 'code');
+      merged.currencies = [...new Set([...(s.currencies || []), ...defaults.currencies])];
+      merged.costObjects = [...new Set([...(s.costObjects || []), ...defaults.costObjects])];
+      merged.knownShortNames = [...new Set([...(s.knownShortNames || []), ...defaults.knownShortNames])];
+    }
     return merged;
   } catch { return defaults; }
 }

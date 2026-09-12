@@ -3,16 +3,14 @@
 import { el } from './dom.js';
 import { minorAmount, validDate, spendingPurpose as purposeOf } from './expense-workflows.js';
 import { normalizePersonalEntries, personalMonthBounds } from './personal-analytics.js';
+import { personalCard, filterPersonalViewEntries } from './personal-filters.js';
 
 const clean = value => String(value ?? '').trim().replace(/\s+/g, ' ');
 const key = value => clean(value).normalize('NFKC').toLocaleLowerCase('tr-TR');
 const add = (a, b) => { const sum = a + b; if (!Number.isSafeInteger(sum)) throw Error('The recorded total is too large to calculate precisely.'); return sum; };
-const purposes = [['all', 'All purposes'], ['personal', 'Personal'], ['business', 'Business'], ['review', 'Needs review']];
+const purposes = [['all', 'All purposes'], ['personal', 'Personal'], ['business', 'Work'], ['review', 'Needs review']];
 const movementLabels = { payment: 'Card repayments', transfer: 'FX and transfers', financing: 'Statement financing', pending: 'Pending authorizations', reward: 'Rewards', unknown: 'Unclassified movements', excluded: 'Other excluded movements' };
-function cardOf(source) {
-  const label = clean(source.card || source.cardName || source.accountName);
-  return { key: clean(source.accountId) || label || '__unrecorded__', label: label || (source.accountId ? 'Unnamed card' : 'No card recorded') };
-}
+const cardOf = personalCard;
 function movementKind(source) {
   const kind = clean(source.bankKind).toLowerCase();
   if (kind === 'pending' || source.bankStatus === 'pending' || source.pending === true) return 'pending';
@@ -81,8 +79,9 @@ function recurringCandidates(history, currentEntries, currency) {
   return result.sort((a, b) => b.currentMinor - a.currentMinor || a.label.localeCompare(b.label));
 }
 
-export function analyzePersonalStudy(rows, { month, currency, categories = [], purpose = 'all', card = '', budgets = [] } = {}) {
+export function analyzePersonalStudy(rows, { month, currency, categories = [], purpose, card, budgets = [], filters = {} } = {}) {
   const bounds = personalMonthBounds(month);
+  purpose ??= filters.purpose || 'all'; card ??= filters.card || '';
   currency = clean(currency).toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) throw Error('Choose a three-letter currency.');
   if (!purposes.some(([value]) => value === purpose)) throw Error('Choose a valid spending purpose.');
@@ -93,7 +92,8 @@ export function analyzePersonalStudy(rows, { month, currency, categories = [], p
   const normalized = normalizePersonalEntries(active.filter(row => !movementKind(row)), { categories });
   const history = normalized.entries.map(entry => ({ ...entry, purpose: purposeOf(entry.source), cardKey: cardOf(entry.source).key, cardLabel: cardOf(entry.source).label }));
   const monthEntries = history.filter(entry => entry.currency === currency && entry.date >= bounds.first && entry.date <= bounds.last);
-  const entries = monthEntries.filter(entry => (purpose === 'all' || entry.purpose === purpose) && (!card || entry.cardKey === card));
+  const selectedFilters = { ...filters, purpose, card };
+  const entries = filterPersonalViewEntries(monthEntries, selectedFilters);
   const excluded = [], movementIssues = [];
   active.forEach((source, index) => {
     const kind = movementKind(source);
@@ -125,8 +125,8 @@ export function analyzePersonalStudy(rows, { month, currency, categories = [], p
   const budgetData = budgetModels(budgets, monthEntries, { month, currency });
   const dates = [...monthEntries.map(entry => entry.date), ...active.filter(row => movementKind(row) && row.currency === currency && validDate(row.date) && row.date >= bounds.first && row.date <= bounds.last).map(row => row.date)].sort();
   const issues = normalized.issues.filter(issue => !validDate(issue.date) || issue.date >= bounds.first && issue.date <= bounds.last);
-  const recurringHistory = history.filter(entry => entry.date <= bounds.last && (purpose === 'all' || entry.purpose === purpose) && (!card || entry.cardKey === card));
-  const purposeTotals = purposes.slice(1).map(([value, label]) => ({ purpose: value, label, ...sumEntries(monthEntries.filter(entry => entry.purpose === value && (!card || entry.cardKey === card)), currency) }));
+  const recurringHistory = filterPersonalViewEntries(history.filter(entry => entry.date <= bounds.last), selectedFilters);
+  const purposeTotals = purposes.slice(1).map(([value, label]) => ({ purpose: value, label, ...sumEntries(filterPersonalViewEntries(monthEntries, { ...selectedFilters, purpose: value }), currency) }));
   return { month, currency, purpose, card, entries, totals: sumEntries(entries, currency), purposeTotals,
     categories: groupEntries(entries, 'category', currency), merchants: groupEntries(entries, 'merchant', currency), cards: groupEntries(entries, 'card', currency),
     availableCards: [...accountMap].map(([value, label]) => ({ key: value, label })).sort((a, b) => a.label.localeCompare(b.label)),
@@ -147,9 +147,10 @@ function select(label, options, selected, change) {
   return el('label', { class: 'study-filter' }, el('span', {}, label), field);
 }
 
-export function renderPersonalStudy({ rows, month, currency, categories = [], budgets = [], onOpenEntry, onOpenBudgets, onImport }) {
+export function renderPersonalStudy({ rows, month, currency, categories = [], budgets = [], filters = {}, sharedFilters = false, onFiltersChange, onOpenEntry, onOpenBudgets, onImport }) {
   const root = el('div', { class: 'personal-study' });
-  const state = { purpose: 'all', card: '', detail: null, visible: 25 };
+  const state = { purpose: filters.purpose || 'all', card: filters.card || '', detail: null, visible: 25 };
+  const change = values => { Object.assign(state, values, { detail: null }); if (onFiltersChange) onFiltersChange(values); else paint(); };
   let model;
   function openEntry(entry) {
     if (!onOpenEntry) return;
@@ -184,18 +185,18 @@ export function renderPersonalStudy({ rows, month, currency, categories = [], bu
     return panel(title, list);
   }
   function paint() {
-    model = analyzePersonalStudy(rows, { month, currency, categories, budgets, purpose: state.purpose, card: state.card });
-    const filters = el('div', { class: 'study-filters' }, select('Purpose', purposes, state.purpose, value => { state.purpose = value; state.detail = null; paint(); }),
-      select('Card', [['', 'All cards'], ...model.availableCards.map(item => [item.key, item.label])], state.card, value => { state.card = value; state.detail = null; paint(); }),
+    model = analyzePersonalStudy(rows, { month, currency, categories, budgets, filters, purpose: state.purpose, card: state.card });
+    const controls = sharedFilters ? null : el('div', { class: 'study-filters' }, select('Purpose', purposes, state.purpose, value => change({ purpose: value })),
+      select('Card', [['', 'All cards'], ...model.availableCards.map(item => [item.key, item.label])], state.card, value => change({ card: value })),
       onImport ? btn('Import bank files', onImport) : null);
     const total = model.totals;
     const summary = el('div', { class: 'study-totals', 'aria-label': 'Filtered spending totals' },
       el('div', {}, el('span', {}, 'Net spending'), el('strong', {}, money(total.netMinor, currency))),
       el('div', {}, el('span', {}, 'Purchases'), el('strong', {}, money(total.purchasesMinor, currency))),
       el('div', {}, el('span', {}, 'Refunds'), el('strong', {}, money(total.refundsMinor, currency))));
-    const purposeLinks = el('div', { class: 'study-purpose-totals' }, ...model.purposeTotals.map(item => btn(`${item.label}: ${money(item.netMinor, currency)} (${item.count})`, () => { state.purpose = item.purpose; state.detail = null; paint(); }, { class: 'link', 'aria-pressed': String(state.purpose === item.purpose) })));
+    const purposeLinks = el('div', { class: 'study-purpose-totals' }, ...model.purposeTotals.map(item => btn(`${item.label}: ${money(item.netMinor, currency)} (${item.count})`, () => change({ purpose: item.purpose }), { class: 'link', 'aria-pressed': String(state.purpose === item.purpose) })));
     const coverage = model.coverage.firstRecordedDate ? `${dateText(model.coverage.firstRecordedDate)}–${dateText(model.coverage.lastRecordedDate)} recorded · ${model.coverage.recordedDays} transaction days.` : 'No dated records in this month and currency.';
-    root.replaceChildren(filters, summary, purposeLinks, el('p', { class: 'study-coverage' }, coverage, ' ', model.coverage.explanation), el('p', { class: 'study-error', role: 'alert' }, model.issues.length ? `${model.issues.length} invalid record${model.issues.length === 1 ? '' : 's'} excluded. Review the source before relying on totals.` : ''));
+    root.replaceChildren(...[controls, summary, purposeLinks, el('p', { class: 'study-coverage' }, coverage, ' ', model.coverage.explanation), el('p', { class: 'study-error', role: 'alert' }, model.issues.length ? `${model.issues.length} invalid record${model.issues.length === 1 ? '' : 's'} excluded. Review the source before relying on totals.` : '')].filter(Boolean));
     if (!model.entries.length && !model.excluded.length) root.append(panel('Study your spending', el('p', {}, 'Import bank statements or add transactions. Categories, cards and the largest purchases will appear here.')));
     if (state.detail) {
       const collection = state.detail.movement ? model.excluded : model.entries;
@@ -225,7 +226,7 @@ export function renderPersonalStudy({ rows, month, currency, categories = [], bu
     if (!model.budgets.length) budgetPanel.append(el('p', { class: 'study-muted' }, 'No budgets saved for this month and currency.'));
     if (model.budgetIssues.length) budgetPanel.append(el('p', { role: 'alert' }, `${model.budgetIssues.length} invalid budget${model.budgetIssues.length === 1 ? '' : 's'} could not be calculated.`));
     root.append(el('div', { class: 'study-grid' }, recurring, budgetPanel));
-    const movements = panel('Bank movements outside spending', el('p', { class: 'study-muted' }, 'These amounts are kept separate from purchases and refunds. Totals below show movement magnitudes, not a bank balance. The card filter applies; the purpose filter does not.'));
+    const movements = panel('Bank movements outside spending', el('p', { class: 'study-muted' }, 'These amounts are kept separate from purchases and refunds. Totals below show movement magnitudes, not a bank balance. Only the month, currency and card filters apply here.'));
     for (const item of model.movements) {
       const row = btn('', () => showEntries(item.label, item.entryIds, true), { class: 'study-candidate' });
       row.append(el('span', {}, el('strong', {}, item.label), el('small', {}, `${item.count} record${item.count === 1 ? '' : 's'}${item.unknownAmountCount ? ` · ${item.unknownAmountCount} amount unavailable` : ''}`)), el('b', { class: 'study-amount' }, money(item.amountMinor, currency)));

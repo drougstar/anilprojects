@@ -1,0 +1,19 @@
+/* Review is a compact action list, with money beside its own expense. */
+.review-total{margin:0 0 12px;font-weight:650}
+.review-stages,.review-actions,.review-badges{display:flex;flex-wrap:wrap;gap:8px}
+.review-stages{margin-bottom:12px}
+.review-detail{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.review-detail>.help{flex-basis:100%;margin:0}
+.review-list{display:grid;gap:10px}
+.review-expense{padding:14px;border:1px solid var(--rule);border-radius:10px;min-width:0}
+.review-expense-title{display:flex;justify-content:space-between;align-items:baseline;gap:16px;margin-bottom:4px}
+.review-expense-title>b{overflow-wrap:anywhere}.review-expense-title>strong{white-space:nowrap}
+.review-badges{margin:9px 0}.review-badge{font-size:12px;padding:3px 7px;border-radius:5px;background:var(--surface-2,rgba(128,128,128,.1))}
+.review-badge.blocking{color:var(--warn);border:1px solid currentColor}
+.review-actions{margin-top:10px}.expense-review{max-width:900px}
+.attention-panel .review-overview-summary{margin:0 0 10px}
+.attention-panel .attention-list>button{display:flex;gap:10px;text-align:left}
+.attention-panel .attention-list .review-attention-label{display:flex;flex-direction:column;flex:1;min-width:0}
+.review-attention-label small{font-weight:400;font-size:12px}
+.review-entrypoint{white-space:nowrap}
+@media(max-width:600px){.review-expense-title{display:block}.review-expense-title>strong{display:block;margin-top:4px}.review-stages{gap:6px}.review-actions>button{flex:1 1 auto}.expense-review{min-width:0}.review-expense{padding:12px}}

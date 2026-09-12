@@ -44,7 +44,7 @@ export function openExpenseTools(row = null) {
     add('Split receipt', personal() ? 'Divide the exact total into separate spending entries.' : 'Divide the exact total between business, personal, or project lines.', () => openSplit(row));
     add('Save as template', 'Reuse these details or prepare a monthly draft.', () => openTemplate(null, row));
   } else {
-    if (!personal()) add('Reimbursements', 'Select expenses and mark their remaining balances paid together.', openReimbursements);
+    if (!personal()) add('Review expenses', 'Receipts, rates, IFS readiness and reimbursements in one place.', () => ctx.review ? ctx.review() : openReimbursements());
     add('Receipt inbox', 'Add several photos, review them, then create or match expenses.', openInbox);
     add('Templates and recurring drafts', 'Reusable details and monthly bills that you confirm before adding.', openTemplates);
     add('Budgets', personal() ? 'Monthly spending limits, with each currency kept separate.' : 'Monthly or trip limits, with each currency kept separate.', openBudgets);
@@ -53,8 +53,9 @@ export function openExpenseTools(row = null) {
   }
 }
 
-export async function openReimbursements() {
-  const rows = (await live('expenses')).filter(l => reimbursementSummary(l).eligible).sort((a, b) => String(b.date).localeCompare(String(a.date))); assertScopeCurrent();
+export async function openReimbursements({ ids } = {}) {
+  const allowed = Array.isArray(ids) ? new Set(ids) : null;
+  const rows = (await live('expenses')).filter(l => (!allowed || allowed.has(l.id)) && reimbursementSummary(l).eligible).sort((a, b) => String(b.date).localeCompare(String(a.date))); assertScopeCurrent();
   const host = el('div', { class: 'workflow-list reimbursement-list' }), mode = select([['open', 'Awaiting payment'], ['all', 'All business expenses'], ['paid', 'Fully paid']], 'open');
   const status = statusNode(), selected = new Set(), selection = el('p', { class: 'help reimbursement-selection', 'aria-live': 'polite' });
   const date = input(today(), 'date'), note = input('', 'text', { placeholder: 'Transfer reference (optional)' });

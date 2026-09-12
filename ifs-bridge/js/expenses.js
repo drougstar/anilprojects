@@ -10,7 +10,9 @@ import { loadSettings, saveSettings } from './store.js';
 import { el, $, confirmButton, openDialog, toast, download, field } from './dom.js';
 import { readReceipt } from './ocr.js';
 import { currentScope, scopedKey, assertScopeCurrent, scopeIsCurrent } from './scope.js';
-import { initExpenseTools, openExpenseTools, openInbox } from './expense-tools.js';
+import { initExpenseTools, openExpenseTools, openInbox, openReimbursements } from './expense-tools.js';
+import { expenseReviewQueue } from './review-queue.js';
+import { openExpenseReviewDialog } from './review-ui.js';
 import { reimbursementSummary, validateExpenseChange, minorAmount } from './expense-workflows.js';
 import { snapshot, restoreSnapshot, assertBackupScope } from './localbackup.js';
 
@@ -30,7 +32,7 @@ const LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
 // ---------- setup / sync ----------
 export function initExpenses(context) {
   ctx = context;
-  initExpenseTools({ settings, today: todayIso, currentSheet, refresh, scheduleSync, downscale, client: supabaseClient, newExpense: openNewExpense, openExpense });
+  initExpenseTools({ settings, today: todayIso, currentSheet, refresh, scheduleSync, downscale, client: supabaseClient, newExpense: openNewExpense, openExpense, review: openExpenseReview });
   client = new Supabase(ctx.settings().supabase);
   window.addEventListener('online', () => {
     if (!scopeIsCurrent()) return;
@@ -271,6 +273,7 @@ function paintHead() {
   const c = supabaseClient();
   host.replaceChildren(
     sel,
+    personalSpace() ? null : el('button', { type: 'button', class: 'review-entrypoint primary', id: 'exp-review', onclick: () => openExpenseReview() }, `Review ${expenseReviewQueue({ lines: data.lines, sheets: data.sheets, settings: settings(), rates: rateCache.byKey }).count}`),
     el('button', { onclick: personalSpace() ? openPersonalSheetsDialog : openSheetsDialog }, personalSpace() ? 'Collections…' : 'Sheets…'),
     el('button', { type: 'button', onclick: () => openExpenseTools() }, 'Tools'),
     el('button', { class: 'icon', title: 'Show the explanation again', 'aria-label': 'Help with expenses', onclick: () => { try { localStorage.removeItem(scopedKey('ifsbridge.expHelp')); } catch {} paintHelp(true); $('#exp-help summary')?.focus(); } }, '?'),
@@ -510,6 +513,7 @@ export async function openExpense(id) {
   await setSheet(row.sheetId); state.filter = 'all'; state.month = ''; state.search = ''; paintAll(); openLineDialog(row);
 }
 export async function showExpenseAttention(kind) {
+  if (!personalSpace()) return openExpenseReview(kind);
   if (personalSpace()) await load(); else await render();
   assertScopeCurrent();
   if (kind === 'inbox') return openInbox();
@@ -518,6 +522,35 @@ export async function showExpenseAttention(kind) {
   const dialog = openDialog(kind === 'receipts' ? 'Expenses missing receipts' : kind === 'rates' ? 'Expenses missing currency rates' : 'Expenses needing attention', host);
   for (const row of rows) host.append(el('button', { class: 'workflow-menu-item', onclick: () => { dialog.close(); openExpense(row.id); } }, el('b', {}, row.written || 'Expense'), el('small', {}, `${row.date} · ${fmtMoney(row.amount, row.currency)} · ${personalSpace() ? row.merchant || row.vendor || '' : data.sheets.find(s => s.id === row.sheetId)?.title || 'Sheet'}`)));
   if (!rows.length) host.append(el('p', { class: 'empty' }, 'Nothing needs attention here.'));
+}
+
+export function openExpenseReview(kind = 'all') {
+  assertScopeCurrent();
+  if (personalSpace()) return showExpenseAttention(kind);
+  if (kind === 'inbox') return openInbox();
+  return openExpenseReviewDialog({
+    isCurrent: () => scopeIsCurrent() && !personalSpace(),
+    read: async () => {
+      const [lines, sheets, cached] = await Promise.all([live('expenses'), live('sheets'), db.meta('rateCache')]);
+      assertScopeCurrent();
+      const s = settings(), field = s.tcmbField || 'ForexBuying';
+      // A rate is still usable if its persistent device-cache write failed.
+      const rates = { ...(cached?.field === field ? cached.byKey : {}), ...(rateCache.field === field ? rateCache.byKey : {}) };
+      return { lines, sheets, settings: s, rates };
+    },
+    expense: openExpense,
+    sheet: async (id, mode) => {
+      await render(); assertScopeCurrent();
+      if (!data.sheets.some(sheet => sheet.id === id)) throw Error('This sheet is no longer available. Reopen Review.');
+      await setSheet(id);
+      if (mode === 'ready') $('#exp-summary')?.scrollIntoView({ block: 'start' }); else openSheetsDialog();
+    },
+    retryRates: async lines => { assertScopeCurrent(); resetRateFailures(); await ensureRates(lines); assertScopeCurrent(); paint(['head', 'summary']); },
+    reimbursements: ids => openReimbursements({ ids }),
+    inbox: openInbox,
+    settings: ctx.openSettings ? () => ctx.openSettings('expenses', 'expense-template') : null,
+    onError: error => { if (scopeIsCurrent()) toast(error.message); },
+  }, kind);
 }
 
 function openPersonalSheetsDialog() {

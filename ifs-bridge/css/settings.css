@@ -1,0 +1,51 @@
+/* Keep the save actions visible in their own row, outside the scrolling fields. */
+#tab-settings.settings-redesign{max-width:1160px;display:grid;grid-template-columns:150px minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;gap:14px}
+.settings-navigation{min-width:0;overflow:auto;align-self:stretch;padding:4px}
+.settings-group-nav{display:flex;flex-direction:column;gap:6px}
+.settings-group-nav button{text-align:left;width:100%;border-color:transparent;background:transparent}
+.settings-group-nav button[aria-current=page]{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);font-weight:600}
+.settings-group-picker{display:none}
+.settings-editor{min-height:0;min-width:0;display:flex;flex-direction:column;gap:8px}
+.settings-editor>h2.settings-group-heading{font-size:20px;margin:2px 0 0;padding-left:3px}
+.settings-editor .settings-fields{flex:1;min-height:0;padding:4px 8px 10px 3px}
+#tab-settings .settings-card h3{font-size:16px;margin:0 0 12px}
+#tab-settings .settings-card .help{margin:6px 0 12px}
+.settings-advanced{border-top:1px solid var(--rule);padding-top:10px;margin-top:12px}
+.settings-advanced summary{cursor:pointer;color:var(--muted);font-size:13px;min-height:28px}
+.settings-advanced[open] summary{margin-bottom:10px}
+.settings-save{grid-column:1/-1;flex-wrap:wrap;justify-content:space-between}
+.settings-save-buttons{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.settings-save #save-status{font-size:12px;max-width:46ch}
+.settings-category-row{display:grid;grid-template-columns:minmax(130px,1fr) minmax(90px,130px) minmax(120px,1fr) auto;gap:10px;align-items:start;padding:12px 0;border-bottom:1px solid var(--rule)}
+.settings-category-row>.settings-advanced{margin:0;padding-top:0;border:0}
+[data-workspace=personal] .settings-category-row{grid-template-columns:minmax(0,1fr) auto}
+.settings-rate-row{display:grid;grid-template-columns:minmax(130px,1fr) minmax(100px,150px) minmax(80px,120px) auto;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid var(--rule)}
+.settings-list-editor{display:grid;gap:7px;max-width:540px;margin-bottom:10px}
+.settings-list-row{display:flex;gap:10px;align-items:center}
+.settings-list-row input{min-width:0;flex:1}
+.settings-field-error{color:var(--danger,#b42318);font-size:12px;display:block;white-space:normal}
+.settings-field-error:empty{display:none}
+.settings-errors{max-height:120px;overflow:auto;border-left:3px solid var(--danger,#b42318);padding:6px 10px;font-size:13px}
+.settings-errors p{margin:4px 0}
+.settings-diff-row{display:grid;grid-template-columns:150px minmax(0,1fr) minmax(0,1fr);gap:14px;padding:14px 0;border-bottom:1px solid var(--rule);overflow-wrap:anywhere}
+.settings-diff-row span{font-size:12px;color:var(--muted)}
+.settings-diff-row p{font-size:13px;margin:4px 0}
+@media(max-width:700px){
+  #tab-settings.settings-redesign{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;gap:8px}
+  .settings-navigation{padding:0;overflow:visible}
+  .settings-group-nav{display:none}
+  .settings-group-picker{display:block;width:100%;min-height:40px}
+  .settings-editor>h2.settings-group-heading{display:none}
+  .settings-editor .settings-fields{padding-right:3px}
+  .settings-category-row{grid-template-columns:minmax(0,1fr) 92px;gap:8px}
+  .settings-category-row>.settings-advanced{grid-column:1}
+  .settings-category-row>button{align-self:end}
+  .settings-rate-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .settings-rate-row>button{align-self:end;justify-self:end}
+  #tab-settings>.settings-save{display:block;min-height:0}
+  .settings-save-buttons{gap:6px}
+  .settings-save-buttons button{padding:8px 10px;font-size:13px}
+  .settings-save #save-status{display:block;margin-top:5px;font-size:12px}
+  .settings-diff-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+  .settings-diff-row>b{grid-column:1/-1}
+}

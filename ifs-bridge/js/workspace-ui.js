@@ -6,6 +6,7 @@ import { db, live, listHistory, undoChange } from './db.js';
 import { sync, checkSetup, listConflicts, resolveConflict } from './sync.js';
 import { rateFor, fmtMoney } from './expense-ifs.js';
 import { mondayOf } from './rules.js';
+import { expenseReviewQueue, setupReviewItems, personalReviewItems, uniqueReviewCount } from './review-queue.js';
 
 let ctx;
 const reload = ({ continueVisit = false } = {}) => {
@@ -152,10 +153,52 @@ export function initWorkspaceUI(context) {
     picker.value = currentScope().workspace;
     picker.addEventListener('change', () => { selectWorkspace(picker.value); reload({ continueVisit: true }); });
   }
-  $('#account-button')?.addEventListener('click', () => openDialog('Account', accountPanel()));
+  $('#account-button')?.addEventListener('click', openAccount);
   // Other windows follow the selected account/space before showing any new data.
   // The auth gate clears private content before an account/workspace reload.
   document.documentElement.dataset.workspace = currentScope().workspace;
+}
+
+export function openAccount() {
+  if (!scopeIsCurrent()) return;
+  return openDialog('Account and security', accountPanel());
+}
+
+// Explicit read-only diagnostics: schema version and verified factors only.
+// This never reads transactions, synchronizes records or starts MFA enrollment.
+export async function testCloudConnection(client, { isCurrent = scopeIsCurrent } = {}) {
+  if (!isCurrent()) throw Error('Sign in again before testing this connection.');
+  if (!client.configured || !client.signedIn) throw Error('Connect your account before testing cloud access.');
+  client.assertScope();
+  const version = Number(await client.schemaVersion());
+  if (!isCurrent()) throw Error('The account or workspace changed. Open the connection panel again.');
+  client.assertScope();
+  if (![2, 3].includes(version)) throw Error('Cloud connection reached. The workspace database update is required before sync.');
+  const factors = await client.listFactors();
+  if (!isCurrent()) throw Error('The account or workspace changed. Open the connection panel again.');
+  client.assertScope();
+  return { version, personalReady: version >= 3, authenticatorSetUp: factors.totp.length > 0, verifiedThisVisit: sessionAssurance(client.session) === 'aal2' };
+}
+
+export function connectionStatusPanel({ showAccountLink = true } = {}) {
+  const c = new Supabase(getConnection());
+  const status = el('p', { class: 'help', role: 'status', 'aria-live': 'polite' },
+    !c.configured ? 'Cloud connection is not configured.' : !c.signedIn ? 'Sign in to test this connection.' : 'Account connected. Cloud access and authenticator setup have not been tested here.');
+  const box = el('div', { class: 'connection-status-panel' });
+  const current = () => box.isConnected && !pageDeparted && scopeIsCurrent();
+  const test = el('button', { type: 'button', onclick: async () => {
+    if (!current() || test.disabled) return;
+    test.disabled = true; status.textContent = 'Checking cloud access…';
+    try {
+      const result = await testCloudConnection(c, { isCurrent: current });
+      if (!current()) return;
+      status.textContent = `Cloud connection works. Work sync is ready. ${result.personalReady ? 'Personal security update is installed.' : 'Personal security still needs the database update.'} ${result.authenticatorSetUp ? 'An authenticator is set up.' : 'No verified authenticator is set up.'} ${result.verifiedThisVisit ? 'This visit has passed authenticator verification.' : 'Personal still requires authenticator verification for this visit.'} No records were synced.`;
+    } catch (error) { if (current()) status.textContent = `Connection test: ${error.message}`; }
+    finally { if (current()) test.disabled = false; }
+  } }, 'Test cloud connection');
+  box.append(status, el('div', { class: 'row' }, test, showAccountLink ? el('button', { type: 'button', class: 'link', onclick: openAccount }, 'Account and security') : null),
+    el('small', { class: 'help' }, 'The test reads connection and security status. Use Sync now to transfer records.'));
+  return box;
 }
 
 export function accountPanel({ signedOut = false } = {}) {
@@ -186,7 +229,11 @@ export function accountPanel({ signedOut = false } = {}) {
       setConnection(next); reload();
     }));
   const box = el('div', { class: 'account-panel' });
-  if (!signedOut && c.signedIn) box.append(el('p', {}, `Signed in as ${c.email}`), el('p', { class: 'help' }, `${currentScope().workspace === 'personal' ? 'Personal' : 'Work'} space · private to this account`));
+  if (!signedOut && c.signedIn) box.append(el('p', {}, `Signed in as ${c.email}`), el('p', { class: 'help' }, `${currentScope().workspace === 'personal' ? 'Personal' : 'Work'} space · private to this account`),
+    el('div', { class: 'account-security-status' }, el('p', {}, 'Work: password sign-in for each visit.'),
+      el('p', {}, sessionAssurance(c.session) === 'aal2' ? 'Personal: authenticator verified for this visit.' : 'Personal: authenticator verification required before records open.'),
+      el('small', { class: 'help' }, 'Authenticator enrollment and the Personal database update are separate requirements. Test the connection to check both.')),
+    connectionStatusPanel({ showAccountLink: false }));
   if (signedOut || !c.signedIn) {
     const email = textInput('', { type: 'email', autocomplete: 'username', placeholder: 'you@example.com' });
     const password = textInput('', { type: 'password', autocomplete: 'current-password' });
@@ -285,44 +332,53 @@ export async function openActivity() {
   try { await refresh(); } catch (error) { status.textContent = error.message; }
 }
 
-export function attentionItems({ lines, sheets, weeks, inbox, conflicts, settings, rates = {}, workspace, today }) {
+export function attentionItems({ lines = [], sheets = [], weeks = [], inbox = [], conflicts = [], settings = {}, rates = {}, workspace, today }) {
   const items = [];
-  const active = lines.filter(line => !line.deleted), sheetsById = new Map(sheets.map(sheet => [sheet.id, sheet]));
-  const business = active.filter(line => line.business && !line.perdiem && !line.entered);
   if (workspace === 'work') {
-    const noReceipt = business.filter(line => !line.receipt && !line.receiptId && !line.receiptIds?.length);
-    if (noReceipt.length) items.push({ kind: 'receipts', label: 'Missing receipts', count: noReceipt.length, ids: noReceipt.map(line => line.id) });
-    const noRate = business.filter(line => !rateFor(line, sheetsById.get(line.sheetId), settings, rates).rate);
-    if (noRate.length) items.push({ kind: 'rates', label: 'Missing exchange rates', count: noRate.length, ids: noRate.map(line => line.id) });
+    const queue = expenseReviewQueue({ lines, sheets, settings, rates });
+    items.push(...queue.stages.filter(stage => stage.count).map(stage => ({ ...stage, severity: stage.kind === 'setup' && !queue.blockingCount ? 'followup' : stage.severity })));
+    items.push(...setupReviewItems(settings));
     if (settings.clockify?.apiKey) {
       const last = new Date(mondayOf(today) + 'T12:00:00Z'); last.setUTCDate(last.getUTCDate() - 7);
       const monday = last.toISOString().slice(0, 10);
-      if (!weeks.some(week => !week.deleted && week.monday === monday && week.enteredAt)) items.push({ kind: 'week', label: 'Review last week', count: 1, monday });
+      if (!weeks.some(week => !week.deleted && week.monday === monday && week.enteredAt)) items.push({ kind: 'week', label: 'Review last week', severity: 'next', count: 1, monday, keys: [`week:${monday}`] });
     }
-  }
+  } else items.push(...personalReviewItems(lines));
   const receipts = inbox.filter(row => !row.deleted && row.status !== 'done' && row.status !== 'created' && row.status !== 'matched' && row.status !== 'imported');
-  if (receipts.length) items.push({ kind: 'inbox', label: 'Receipts waiting for review', count: receipts.length });
-  if (conflicts.length) items.push({ kind: 'conflicts', label: 'Sync conflicts to resolve', count: conflicts.length });
+  if (receipts.length) items.push({ kind: 'inbox', label: 'Receipt inbox', severity: 'followup', count: receipts.length, keys: receipts.map(row => `inbox:${row.id}`) });
+  if (conflicts.length) items.push({ kind: 'conflicts', label: 'Sync conflicts', severity: 'blocking', count: conflicts.length, keys: conflicts.map((row, index) => row.table === 'expenses' && (row.recordId || row.local?.id || row.remote?.id) ? `expense:${row.recordId || row.local?.id || row.remote?.id}` : `conflict:${row.id || index}`) });
   return items;
 }
 
 export async function attentionPanel() {
-  const [lines, sheets, weeks, inbox, conflicts, cache] = await Promise.all([
+  let snapshot;
+  try { snapshot = await Promise.all([
     live('expenses'), live('sheets'), live('weeks'), live('inbox'), listConflicts(), db.meta('rateCache')
-  ]);
+  ]); } catch (error) {
+    if (!scopeIsCurrent()) return null;
+    return el('section', { class: 'attention-panel', 'aria-label': 'Review' }, el('h3', {}, 'Review unavailable'), el('p', { class: 'help', role: 'status' }, error.message));
+  }
   if (!scopeIsCurrent()) return null;
+  const [lines, sheets, weeks, inbox, conflicts, cache] = snapshot;
   const settings = ctx.settings();
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: settings.timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   const rates = cache?.field === (settings.tcmbField || 'ForexBuying') ? cache.byKey : {};
   const items = attentionItems({ lines, sheets, weeks, inbox, conflicts, settings, rates, workspace: currentScope().workspace, today });
   const action = item => {
+    if (!scopeIsCurrent()) return;
     if (item.kind === 'conflicts') return openActivity();
     if (item.kind === 'week') return ctx.reviewWeek(item.monday);
-    ctx.openExpenses(item.kind);
+    if (item.section) return ctx.openSettings?.(item.section, item.focus);
+    if (currentScope().workspace === 'personal' && ctx.reviewPersonal) return ctx.reviewPersonal(item.kind);
+    (ctx.reviewExpenses || ctx.openExpenses)?.(item.kind);
   };
-  return el('section', { class: 'attention-panel', 'aria-label': 'Needs attention' },
-    el('div', { class: 'section-head' }, el('h3', {}, 'Needs attention'), el('button', { type: 'button', class: 'link', onclick: openActivity }, 'History')),
-    items.length ? el('div', { class: 'attention-list' }, items.map(item => el('button', { type: 'button', onclick: () => action(item) }, el('span', {}, item.label), el('b', {}, String(item.count))))) : el('p', { class: 'help' }, 'No missing items found in this space.'));
+  const count = uniqueReviewCount(items);
+  return el('section', { class: 'attention-panel', 'aria-label': 'Review' },
+    el('div', { class: 'section-head' }, el('h3', {}, `Review ${count}`), el('button', { type: 'button', class: 'link', onclick: () => { if (scopeIsCurrent()) openActivity(); } }, 'History')),
+    items.length ? el('p', { class: 'help review-overview-summary' }, 'Each item is counted once. An expense can appear in more than one group.') : null,
+    items.length ? el('div', { class: 'attention-list' }, items.map(item => el('button', { type: 'button', 'data-attention-kind': item.kind, onclick: () => action(item) },
+      el('span', { class: 'review-attention-label' }, item.label, el('small', { class: item.severity === 'blocking' ? 'warn-text' : 'muted' }, item.severity === 'blocking' ? 'Blocked · action needed' : item.severity === 'next' ? 'Next step' : 'Follow-up')),
+      el('b', {}, String(item.count))))) : el('p', { class: 'help' }, 'No records need review.'));
 }
 
 

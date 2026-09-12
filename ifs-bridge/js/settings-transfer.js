@@ -56,6 +56,7 @@ const travel = object({ activityNo: string(), activitySeq: string(), activityDes
 const mapping = object({ clockifyProjectId: string(), clockifyProjectName: string(), kind: enumeration(['project', 'general', 'ignore']), regularHours: optionalHours, travelAfterHours: optionalHours,
   projectId: string(), projectName: string(), subProjectId: string(), subProjectDesc: string(), activityNo: string(), activitySeq: string(), activityDesc: string(), shortName: string(), travel });
 const workShape = {
+  settingsListsVersion: enumeration([2]),
   timeCalculationMode: enumeration(['rules', 'tags']), timeCodeMappingsVersion: enumeration([2]),
   timeZone: timezone, regularHours: number(0, 24), travelAfterHours: number(0, 24), topUpMinimum: bool,
   roundStep: number(0.001, 24), roundMode: enumeration(['nearest', 'down', 'up']), holidays: array(date, 10000),
@@ -76,7 +77,7 @@ const workShape = {
   payRate: number(0, 1000000000), payCurrency: currency, restDaysPaid: bool, restDayHours: number(0, 24), payMinDay: number(0, 24),
   mapping: array(mapping), clockify: object({ apiKey: string(4096) }, ['apiKey']),
 };
-const personalShape = Object.fromEntries(['timeZone', 'defaultCurrency', 'currencies', 'expenseCodes'].map(key => [key, workShape[key]]));
+const personalShape = Object.fromEntries(['settingsListsVersion', 'timeZone', 'defaultCurrency', 'currencies', 'expenseCodes'].map(key => [key, workShape[key]]));
 const workspaceOf = workspace => enumeration(['work', 'personal'])(workspace, 'workspace');
 const shapeOf = workspace => workspace === 'personal' ? personalShape : workShape;
 

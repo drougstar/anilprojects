@@ -1,18 +1,18 @@
 import { currentScope, scopedKey, scopeIsCurrent, assertScopeCurrent } from './scope.js';
-import { initWorkspaceUI, accountPanel, initAuthGate, revealPrivateApp } from './workspace-ui.js';
+import { initWorkspaceUI, openAccount, connectionStatusPanel, initAuthGate, revealPrivateApp } from './workspace-ui.js';
 import { Clockify } from './clockify.js';
 import { buildWeek, mondayOf, fetchWindow, DAYS, localToUtc, utcToLocalInput } from './rules.js';
-import { TIME_CODE_CATALOG, effectiveTimeCodeMappings, calculationMode, timeCodeInfo } from './time-codes.js';
-import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber, activityFromRecord, identityFromRecord } from './ifs.js';
-import { loadSettings, saveSettings, DEFAULTS, defaultsForScope } from './store.js';
-import { createSettingsFile, parseSettingsFile } from './settings-transfer.js';
-import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, showExpenseAttention } from './expenses.js';
+import { timeCodeInfo } from './time-codes.js';
+import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber } from './ifs.js';
+import { loadSettings, saveSettings, defaultsForScope } from './store.js';
+import { createSettingsPage } from './settings-ui.js';
+import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, openExpenseReview } from './expenses.js';
 import { el, $, confirmButton, toast, openDialog, download, field as dlgField } from './dom.js';
-import { initLocalBackup, backupAvailable, backupMeta, pushBackup } from './localbackup.js';
+import { initLocalBackup, backupAvailable, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
 import { allWeeks, weekRecord, markWeekEntered, unmarkWeek, diffRows, recentMondays, shiftIso } from './week-status.js';
 import { initReport, render as renderOverview } from './report.js';
-import { initPersonal, renderPersonal } from './personal.js';
+import { initPersonal, renderPersonal, reviewPersonal } from './personal.js';
 import { initShell, updateShell } from './shell.js';
 
 let settings = scopeIsCurrent() ? loadSettings() : null;
@@ -23,7 +23,7 @@ let clockifyProjects = null;
 let weekEntries = [];      // raw Clockify entries of the loaded week (for the editor)
 let clockifyMeta = null;   // { projects, tags } for the entry dialog
 let clockifyConnectId = 0;
-let settingsImportUndo = null;
+let settingsPage = null;
 let clockifyTags = null;
 
 function invalidateClockifyView({ keepMetadata = false } = {}) {
@@ -58,9 +58,9 @@ const fmtH = h => (h === 0 ? '' : (Math.round(h * 100) / 100).toString());
 // ---------- tabs ----------
 function showTab(name) {
   // Ignore a stale saved tab name instead of hiding every screen.
-  if (!['week', 'expenses', 'overview', 'settings'].includes(name)) name = 'week';
+  if (!['week', 'expenses', 'overview', 'study', 'settings'].includes(name)) name = 'week';
   const personal = currentScope().workspace === 'personal';
-  if (personal && name === 'week') name = 'overview';
+  if ((personal && name === 'week') || (!personal && name === 'study')) name = 'overview';
   if (!scopeIsCurrent()) return;
   const previous = document.querySelector('.tabs button.active')?.dataset.tab;
   if (previous && previous !== name) window.scrollTo({ top: 0, behavior: 'instant' });
@@ -71,13 +71,14 @@ function showTab(name) {
   if (name === 'settings') renderSettings();
   if (name === 'expenses') { personal ? renderPersonal($('#tab-expenses'), 'transactions') : renderExpenses(); scheduleSync(500); }
   if (name === 'overview') { personal ? renderPersonal($('#tab-overview'), 'overview') : renderOverview(); if (personal) scheduleSync(500); }
+  if (name === 'study' && personal) { renderPersonal($('#tab-study'), 'study'); scheduleSync(500); }
   if (name === 'week' && !week && settings.clockify.apiKey) loadWeek();   // no need to press Load the first time
   if (name === 'week' && !settings.clockify.apiKey) {
     $('#week-result').replaceChildren(el('div', { class: 'empty expense-empty' },
       el('h3', {}, 'Bring your week into focus'),
       el('p', {}, 'Connect Clockify to review your hours, check the IFS activity mapping and prepare your weekly timesheet.'),
       el('div', { class: 'actions', style: 'justify-content:center' },
-        el('button', { class: 'primary', onclick: () => showTab('settings') }, 'Connect Clockify'),
+        el('button', { class: 'primary', onclick: () => openSettings('connections') }, 'Connect Clockify'),
         el('button', { onclick: () => showTab('expenses') }, 'Open expenses'))));
   }
 }
@@ -111,7 +112,7 @@ async function loadWeek() {
     $('#btn-load').disabled = false;
     host.removeAttribute('aria-busy');
     status.textContent = 'Add your Clockify API key in Settings first.';
-    showTab('settings');
+    openSettings('connections');
     return;
   }
   status.textContent = `Loading week of ${monday}…`;
@@ -276,7 +277,7 @@ async function fetchWeek(monday) {
 }
 
 function openBulkDialog() {
-  if (!settings.clockify.apiKey) { toast('Add the Clockify API key in Settings first.'); showTab('settings'); return; }
+  if (!settings.clockify.apiKey) { toast('Add the Clockify API key in Settings first.'); openSettings('connections'); return; }
   const thisMonday = mondayOf(todayIso());
   const from = el('input', { type: 'date', value: shiftIso(thisMonday, -28) });
   const to = el('input', { type: 'date', value: shiftIso(thisMonday, -7) });
@@ -486,7 +487,7 @@ async function openEntryDialog(entry, dayIso) {
   const d = openDialog(isNew ? 'New Clockify entry' : 'Edit Clockify entry', el('div', { class: 'form' },
     dlgField('Project', project, 'The Clockify project. The mapping in Settings turns it into the IFS activity.'),
     el('div', { class: 'grid3' }, dlgField('Date', date, `Local, ${tz}.`), dlgField('Start', start, '24-hour, e.g. 08:30'), dlgField('End', end, hours)),
-    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Time calculation and tags. Leave and holiday codes use General.')),
+    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Time. Leave and holiday codes use General.')),
     dlgField('Description', desc, 'Free text. A line “Short Name: 210701.010101.010101-B” sends the entry to that IFS activity.'),
     el('div', { class: 'actions' }, saveBtn, el('button', { onclick: () => d.close() }, 'Cancel'),
       isNew ? null : confirmButton('Delete in Clockify', async () => { try { await c.deleteEntry(ws, entry.id); d.close(); toast('Deleted in Clockify'); await loadWeek(); } catch (e) { status.textContent = e.message; } }),
@@ -501,520 +502,38 @@ async function copyExport() {
 }
 
 // ---------- settings ----------
-function renderSettings() {
-  const root = $('#tab-settings');
-  root.replaceChildren();
-  const s = settings;
-
-  const field = (label, input, hint) => el('label', { class: 'field' }, el('span', {}, label), input, hint ? el('small', {}, hint) : null);
-  const txt = (value, attrs = {}) => el('input', { type: 'text', value: value ?? '', ...attrs });
-
-  // A portable file contains this space's preferences, never records or a login session.
-  const workspace = currentScope().workspace;
-  const spaceName = workspace === 'personal' ? 'Personal' : 'Work';
-  const transferStatus = el('p', { id: 'settings-transfer-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
-  const includeKey = el('input', { type: 'checkbox', id: 'settings-include-key' });
-  const fileInput = el('input', { type: 'file', id: 'settings-file', accept: '.json,application/json', hidden: true });
-  let importRequest = 0;
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files?.[0], request = ++importRequest;
-    fileInput.value = ''; // Choosing the same file again must still fire change.
-    if (!file) return;
-    transferStatus.textContent = 'Reading settings…';
-    try {
+function renderSettings(group, focus) {
+  if (!scopeIsCurrent() || !settings) return;
+  if (!settingsPage) settingsPage = createSettingsPage({
+    // Read persisted preferences when merging: another open tab may have saved
+    // changes since this tab created its draft.
+    workspace: currentScope().workspace, getSaved: loadSettings, isCurrent: scopeIsCurrent,
+    onSave: async next => {
       assertScopeCurrent();
-      if (file.size > 1024 * 1024) throw Error('Choose a settings JSON file smaller than 1 MB.');
-      const text = await file.text();
-      if (!scopeIsCurrent() || request !== importRequest || !root.contains(fileInput)) return;
-      const previous = collectSettings();
-      const imported = parseSettingsFile(text, { workspace, current: previous });
-      transferStatus.textContent = '';
-      const error = el('p', { id: 'settings-import-error', role: 'status', 'aria-live': 'polite', class: 'muted' });
-      const included = workspace === 'personal'
-        ? 'Currencies, categories and spending preferences.'
-        : 'Clockify rules, IFS identity and project mappings, row templates, pay and expense preferences.';
-      const preview = el('div', {},
-        el('p', {}, `Import into your ${spaceName} space on this browser.`),
-        el('p', { class: 'muted' }, included),
-        el('p', {}, `${imported.summary.fieldCount} settings · ${imported.summary.categoryCount} categories${workspace === 'work' ? ` · ${imported.summary.mappingCount} project mapping${imported.summary.mappingCount === 1 ? '' : 's'}` : ''}`),
-        el('p', { class: 'muted' }, 'Settings included in the file replace their current values. Expenses, timesheets and sign-in stay as they are.'),
-        workspace === 'work' ? el('p', {}, imported.includesApiKey ? 'Clockify API key included. The imported key will be used next time you connect.' : 'No Clockify API key included. Your current key is kept.') : null,
-        error);
-      const dialog = openDialog('Import settings', preview);
-      preview.append(el('div', { class: 'actions' },
-        el('button', { id: 'settings-apply', class: 'primary', onclick: () => {
-          try {
-            assertScopeCurrent();
-            // Persist first: a full/blocked browser store must not pretend the import worked.
-            saveSettings(imported.settings, { strict: true });
-            settingsImportUndo = previous;
-            settings = imported.settings;
-            ++clockifyConnectId; invalidateClockifyView();
-            dialog.close(); renderSettings();
-            $('#settings-transfer-status').textContent = 'Settings imported. You can undo this import below.';
-            $('#save-status').textContent = 'Settings imported.';
-            toast('Settings imported');
-          } catch (err) { if (scopeIsCurrent()) error.textContent = `Import failed: ${err.message}`; }
-        } }, 'Apply settings'),
-        el('button', { onclick: () => dialog.close() }, 'Cancel')));
-    } catch (err) { if (scopeIsCurrent()) transferStatus.textContent = `Import failed: ${err.message}`; }
-  });
-  root.append(el('section', {}, el('h3', {}, 'Import and export settings'),
-    el('p', { class: 'muted' }, `Save your ${spaceName} setup to a file, then import it on your phone or another browser. The export includes your current edits.`),
-    workspace === 'work' ? el('label', { class: 'field check' }, el('span', { class: 'row' }, includeKey, 'Include Clockify API key'), el('small', {}, 'The key is readable in the file. Keep that copy private.')) : null,
-    el('div', { class: 'row' },
-      el('button', { id: 'settings-export', onclick: () => {
-        try {
-          assertScopeCurrent();
-          const payload = createSettingsFile(collectSettings(), { workspace, includeApiKey: workspace === 'work' && includeKey.checked });
-          download(`ifsbridge-${workspace}-settings-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json');
-          transferStatus.textContent = 'Settings file downloaded. Import it in the same space on your other device.';
-        } catch (err) { if (scopeIsCurrent()) transferStatus.textContent = `Export failed: ${err.message}`; }
-      } }, 'Export settings'),
-      el('button', { id: 'settings-import', onclick: () => { if (scopeIsCurrent()) fileInput.click(); } }, 'Import settings…'),
-      settingsImportUndo ? el('button', { id: 'settings-undo-import', class: 'link', onclick: () => {
-        try {
-          assertScopeCurrent(); saveSettings(settingsImportUndo, { strict: true });
-          settings = settingsImportUndo; settingsImportUndo = null;
-          ++clockifyConnectId; invalidateClockifyView(); renderSettings();
-          $('#settings-transfer-status').textContent = 'Previous settings restored.';
-          $('#save-status').textContent = 'Saved.';
-        } catch (err) { if (scopeIsCurrent()) transferStatus.textContent = `Undo failed: ${err.message}`; }
-      } }, 'Undo last import') : null), fileInput, transferStatus));
-
-  // Appearance
-  const themeBtns = ['auto', 'light', 'dark'].map(m => el('button', { class: 'chip' + (currentTheme() === m ? ' on' : ''), onclick: e => { applyTheme(m); for (const b of themeBtns) b.classList.toggle('on', b === e.currentTarget); } }, m === 'auto' ? 'Follow system' : m === 'light' ? 'Light' : 'Dark'));
-  root.append(el('section', {}, el('h3', {}, 'Appearance'), el('div', { class: 'theme-pick' }, themeBtns), el('small', { class: 'help' }, 'Applies on this device only.')));
-
-  // Pay estimate (used by the Overview tab)
-  const payRate = txt(s.payRate || '', { type: 'number', step: '0.01', inputmode: 'decimal', placeholder: '0.00', oninput: e => { s.payRate = Number(String(e.target.value).replace(',', '.')) || 0; } });
-  const payCur = el('select', { onchange: e => { s.payCurrency = e.target.value; } }, s.currencies.map(c => el('option', { value: c, selected: c === (s.payCurrency || 'TRY') ? 'selected' : null }, c)));
-  const payMin = txt(s.payMinDay ?? 9, { type: 'number', step: '0.5', inputmode: 'decimal', oninput: e => { s.payMinDay = Number(String(e.target.value).replace(',', '.')) || 0; } });
-  const restH = txt(s.restDayHours ?? 7.5, { type: 'number', step: '0.5', inputmode: 'decimal', oninput: e => { s.restDayHours = Number(String(e.target.value).replace(',', '.')) || 0; } });
-  const restOn = el('input', { type: 'checkbox', checked: s.restDaysPaid !== false ? 'checked' : null, onchange: e => { s.restDaysPaid = e.target.checked; } });
-  root.append(el('section', {}, el('h3', {}, 'Pay estimate'),
-    el('div', { class: 'grid3' },
-      field('Hourly rate', el('div', { class: 'row tight' }, payRate, payCur), 'Gross rate per hour. Only used for the estimate on the Overview tab.'),
-      field('Day minimum (h)', payMin, 'A worked weekday counts as at least this many regular hours; an 8 h day on a US project gets 1 h added.'),
-      el('label', { class: 'field' }, el('span', {}, 'Paid rest days'), el('span', { class: 'row' }, restOn, 'Sundays and holidays count, at', restH, 'h each'), el('small', {}, '45 h over 6 days gives 7.5 h. Dates come from Time calculation and tags → Automatic rules.'))),
-    el('small', { class: 'help' }, 'Multipliers: regular and travel ×1; overtime ×1.5 and ×2. Day minimum and paid rest additions apply only in Automatic rules mode. Leave pay stays unknown unless you set its multiplier.')));
-
-  // Clockify
-  const key = txt(s.clockify.apiKey, { type: 'password', autocomplete: 'off', spellcheck: 'false', id: 'set-key' });
-  const testBtn = el('button', { onclick: async () => {
-    if (testBtn.disabled) return;
-    const enteredKey = key.value.trim(), st = $('#key-status');
-    if (!enteredKey) { st.textContent = 'Enter your Clockify API key first.'; return; }
-    assertScopeCurrent();
-    changeClockifyKey(enteredKey);
-    const request = ++clockifyConnectId;
-    testBtn.disabled = true; st.textContent = 'Checking…';
-    try {
-      const u = await new Clockify(enteredKey).user();
-      if (!scopeIsCurrent() || request !== clockifyConnectId || settings.clockify.apiKey !== enteredKey) return;
-      if (key.value.trim() !== enteredKey) { st.textContent = 'Key changed. Press Connect to check it.'; return; }
-      invalidateClockifyView();
-      settings.clockify.userId = u.id; settings.clockify.workspaceId = u.activeWorkspace; settings.clockify.userName = u.name;
-      if (u.settings?.timeZone) settings.timeZone = u.settings.timeZone;
-      saveSettings(settings); st.textContent = `Connected as ${u.name} (${settings.timeZone}).`; renderSettings();
-    } catch (e) {
-      if (scopeIsCurrent() && request === clockifyConnectId) st.textContent = e.message;
-    } finally { testBtn.disabled = false; }
-  } }, 'Connect');
-  root.append(el('section', {}, el('h3', {}, 'Clockify'),
-    field('API key', key, 'Clockify → Profile settings → API. Stored only in this browser.'),
-    el('div', { class: 'row' }, testBtn, el('span', { id: 'key-status', class: 'muted' }, s.clockify.userName ? `Connected as ${s.clockify.userName} (${s.timeZone}).` : 'Not connected.'))));
-
-  // Rules
-  const reg = txt(s.regularHours, { type: 'number', step: '0.5', min: '0' });
-  const trAfter = txt(s.travelAfterHours, { type: 'number', step: '0.5', min: '0' });
-  const step = txt(s.roundStep, { type: 'number', step: '0.25', min: '0.25' });
-  const mode = el('select', {}, [['nearest', 'nearest'], ['down', 'down'], ['up', 'up']].map(([v, l]) => el('option', { value: v, selected: s.roundMode === v ? 'selected' : null }, l)));
-  const kw = txt(s.travelKeyword);
-  const cReg = txt(s.codes.regular), c15 = txt(s.codes.ot15), c2 = txt(s.codes.ot2), cTr = txt(s.codes.travel), cTrR = txt(s.codes.travelRegular);
-  const dReg = txt(s.codeDescriptions[s.codes.regular] || ''), d15 = txt(s.codeDescriptions[s.codes.ot15] || ''), d2 = txt(s.codeDescriptions[s.codes.ot2] || ''), dTr = txt(s.codeDescriptions[s.codes.travel] || ''), dTrR = txt(s.codeDescriptions[s.codes.travelRegular] || '');
-  const hol = el('textarea', { rows: 2, placeholder: '2026-10-29, 2026-01-01', spellcheck: 'false' }, (s.holidays || []).join(', '));
-  const topUp = el('input', { type: 'checkbox', checked: s.topUpMinimum !== false ? 'checked' : null });
-  const automaticRules = el('fieldset', { id: 'automatic-time-rules', style: 'border:0;padding:0;margin:0' },
-    el('div', { class: 'grid3' },
-      field('Regular hours per weekday', reg, 'Default. A project can override it below (US projects: 8). General/break counts inside it.'),
-      field('Travel overtime after (h)', trAfter, 'Weekday travel beyond this many hours of work + travel is travel overtime ×1.')),
-    el('div', { class: 'grid3' }, field('Holidays (dates, comma separated)', hol, 'Worked hours count like Sunday: work ×2, travel ×1. The Holiday tag instead records F_07 on General.'),
-      el('label', { class: 'field check' }, el('span', {}, 'Minimum day'), el('span', { class: 'row' }, topUp, 'Book at least the regular hours on a worked weekday'), el('small', {}, 'IFS expects 8 h abroad and 9 h in Turkey even if less was logged.'))),
-    el('div', { class: 'grid3' }, field('Regular code', cReg), field('Overtime ×1.5 code', c15), field('Overtime ×2 code', c2), field('Travel regular code', cTrR), field('Travel overtime ×1 code', cTr)),
-    el('div', { class: 'grid3' }, field('Regular description', dReg, 'As IFS shows it, optional.'), field('×1.5 description', d15), field('×2 description', d2), field('Travel regular description', dTrR), field('Travel overtime description', dTr)),
-    field('Or description starting with', kw, 'In Automatic rules mode, descriptions starting with this word count as travel without a tag.'));
-
-  // Mapping
-  const automaticDetails = el('details', { id: 'automatic-rules-details' }, el('summary', {}, 'Automatic rules'), automaticRules);
-  const reflectCalculationMode = value => {
-    const useTags = value === 'tags';
-    automaticDetails.hidden = automaticRules.disabled = useTags;
-    for (const control of [payMin, restOn, restH]) control.disabled = useTags;
-  };
-  const timeCodes = renderTimeCodeSettings(s, () => ({ ...s.clockify, enteredKey: key.value.trim() }), reflectCalculationMode);
-  timeCodes.controls.append(el('div', { class: 'grid2' }, field('Round each day/project to (h)', step), field('Rounding', mode)), automaticDetails);
-  reflectCalculationMode(calculationMode(s));
-  root.append(timeCodes.section);
-  const mapHost = el('div', { class: 'tbl' });
-  const renderMap = () => {
-    mapHost.replaceChildren(el('table', { class: 'map' },
-      el('thead', {}, el('tr', {}, ['Clockify project', 'Kind', 'Reg h', 'Project', 'Sub', 'Activity', 'Activity seq', 'Short name', 'Travel activity (no · seq · short name)', ''].map(h => el('th', {}, h)))),
-      el('tbody', {}, s.mapping.map((m, i) => {
-        const tr = m.travel || (m.travel = { activityNo: '', activitySeq: '', activityDesc: 'TRAVEL', shortName: '' });
-        return el('tr', {},
-        el('td', {}, el('b', {}, m.clockifyProjectName || m.clockifyProjectId)),
-        el('td', {}, el('select', { onchange: e => { m.kind = e.target.value; } }, ['project', 'general', 'ignore'].map(k => el('option', { value: k, selected: m.kind === k ? 'selected' : null }, k)))),
-        el('td', {}, txt(m.regularHours ?? '', { size: 3, placeholder: String(s.regularHours), oninput: e => { m.regularHours = e.target.value.trim(); } })),
-        el('td', {}, txt(m.projectId, { size: 7, oninput: e => { m.projectId = e.target.value.trim(); } })),
-        el('td', {}, txt(m.subProjectId, { size: 6, oninput: e => { m.subProjectId = e.target.value.trim(); } })),
-        el('td', {}, txt(m.activityNo, { size: 8, oninput: e => { m.activityNo = e.target.value.trim(); } })),
-        el('td', {}, txt(m.activitySeq, { size: 10, oninput: e => { m.activitySeq = e.target.value.trim(); } })),
-        el('td', {}, txt(m.shortName, { size: 20, oninput: e => { m.shortName = e.target.value.trim(); } })),
-        el('td', { class: 'travel-cell' },
-          txt(tr.activityNo, { size: 8, placeholder: 'activity', oninput: e => { tr.activityNo = e.target.value.trim(); } }),
-          txt(tr.activitySeq, { size: 10, placeholder: 'seq', oninput: e => { tr.activitySeq = e.target.value.trim(); } }),
-          txt(tr.shortName, { size: 20, placeholder: 'short name', oninput: e => { tr.shortName = e.target.value.trim(); } })),
-        el('td', {}, el('button', { class: 'link', onclick: () => { s.mapping.splice(i, 1); renderMap(); } }, 'remove')));
-      }))));
-  };
-  renderMap();
-  const addFromClockify = el('button', { onclick: async () => {
-    try {
-      const c = new Clockify(settings.clockify.apiKey);
-      clockifyProjects = await c.projects(settings.clockify.workspaceId);
-      let added = 0;
-      for (const p of clockifyProjects) if (!s.mapping.some(m => m.clockifyProjectId === p.id)) { s.mapping.push({ clockifyProjectId: p.id, clockifyProjectName: p.name, kind: 'project', regularHours: '', projectId: '', subProjectId: '', activityNo: '', activitySeq: '', shortName: '', projectName: '', subProjectDesc: '', activityDesc: '', travel: { activityNo: '', activitySeq: '', activityDesc: 'TRAVEL', shortName: '' } }); added++; }
-      renderMap(); $('#map-status').textContent = added ? `${added} new Clockify project${added > 1 ? 's' : ''} added; fill in the IFS columns.` : 'All Clockify projects are already listed.';
-    } catch (e) { $('#map-status').textContent = e.message; }
-  } }, 'Add missing Clockify projects');
-
-  const importArea = el('textarea', { rows: 6, placeholder: 'Paste one row copied from Proje Zaman Kaydı (right-click → Edit → Copy Object)…', spellcheck: 'false' });
-  const importSel = el('select', {}, el('option', { value: '' }, 'Apply activity to Clockify project…'), s.mapping.map(m => el('option', { value: m.clockifyProjectId }, m.clockifyProjectName)));
-  const importBtn = el('button', { onclick: () => {
-    const rec = parseCopyObject(importArea.value);
-    const st = $('#import-status');
-    if (!rec) { st.textContent = 'That does not look like an IFS Copy Object row.'; return; }
-    if (rec.lu !== 'ProjectTransWeek') { st.textContent = `This row is from ${rec.lu}, not the weekly project time grid.`; return; }
-    const act = activityFromRecord(rec), idn = identityFromRecord(rec);
-    const notes = [];
-    if (idn.empNo) { s.identity = { ...s.identity, ...idn }; notes.push(`employee ${idn.empNo}`); }
-    const codeField = rec.fields.find(f => f.name === 'REPORT_COST_CODE')?.value || '';
-    const isTravelRow = codeField === s.codes.travel || /travel/i.test(act.activityDesc || '');
-    if (importSel.value) {
-      const m = s.mapping.find(x => x.clockifyProjectId === importSel.value);
-      if (isTravelRow) {
-        m.travel = { activityNo: act.activityNo, activitySeq: act.activitySeq, activityDesc: act.activityDesc, shortName: act.shortName };
-        if (!m.projectId) { m.projectId = act.projectId; m.projectName = act.projectName; m.subProjectId = act.subProjectId; m.subProjectDesc = act.subProjectDesc; }
-        notes.push(`${m.clockifyProjectName} travel → ${act.shortName}`);
-      } else { const keepTravel = m.travel; Object.assign(m, act); if (keepTravel) m.travel = keepTravel; notes.push(`${m.clockifyProjectName} → ${act.shortName}`); }
-      if (m.kind === 'ignore') m.kind = 'project';
-      renderMap();
-    }
-    // refresh template but keep quantities/dates empty
-    const blank = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'].map(d => `${d}_INTERNAL_QUANTITY`);
-    for (const f of rec.fields) if (blank.includes(f.name) || f.n === 15 || f.name === 'ACCOUNT_DATE' || (f.name === 'COST_ACCOUNTING' && f.n === 4)) f.value = '';
-    s.template = rebuildTemplate(rec);
-    templateArea.value = s.template;
-    const desc = rec.fields.find(f => f.name.startsWith('REPORT_COST_API.GET_DESCRIPTION'));
-    const code = rec.fields.find(f => f.name === 'REPORT_COST_CODE');
-    if (code?.value && desc?.value) {
-      s.codeDescriptions[code.value] = desc.value;
-      s.timeCodeCatalog = [...(s.timeCodeCatalog || []).filter(item => item.code !== code.value), { code: code.value, description: desc.value, source: 'ifs-copy' }];
-      timeCodes.refreshCatalog();
-      notes.push(`${code.value} = ${desc.value}; available as a choice in time-code settings`);
-    }
-    st.textContent = `Imported: ${notes.join(', ') || 'template only'}. Save to keep it.`;
-  } }, 'Import row');
-  const templateArea = el('textarea', { rows: 8, spellcheck: 'false' }, s.template);
-  templateArea.addEventListener('input', () => { s.template = templateArea.value; });
-
-  root.append(el('section', {}, el('h3', {}, 'Clockify project → IFS activity'), mapHost,
-    el('div', { class: 'row' }, addFromClockify, el('span', { id: 'map-status', class: 'muted' })),
-    el('h4', {}, 'Import from a copied IFS row'), el('p', { class: 'muted' }, 'The fastest way to fill a mapping: in IFS select one row of that activity, Copy Object, paste it here and choose the Clockify project. It also captures your employee fields and the row template.'),
-    importArea, el('div', { class: 'row' }, importSel, importBtn, el('span', { id: 'import-status', class: 'muted' })),
-    el('details', {}, el('summary', {}, 'Row template used for export'), templateArea)));
-
-  // Account changes reload before any records from the new account can sync.
-  root.append(el('section', {}, el('h3', {}, 'Account and sync'), accountPanel()));
-
-  // Expense defaults
-  const defCur = el('select', { onchange: e => { s.defaultCurrency = e.target.value; } }, s.currencies.map(c => el('option', { value: c, selected: c === s.defaultCurrency ? 'selected' : null }, c)));
-  const costList = txt((s.costObjects || []).join(', '), { oninput: e => { s.costObjects = e.target.value.split(',').map(x => x.trim()).filter(Boolean); } });
-  const expTemplate = el('textarea', { rows: 8, spellcheck: 'false' }, s.expenseTemplate);
-  expTemplate.addEventListener('input', () => { s.expenseTemplate = expTemplate.value; });
-  const expImport = el('textarea', { rows: 4, placeholder: 'Paste one row copied from the IFS Expense Details grid to refresh the template…', spellcheck: 'false' });
-  const expImportBtn = el('button', { onclick: () => {
-    const rec = parseCopyObject(expImport.value); const st = $('#exp-import-status');
-    if (!rec) { st.textContent = 'That does not look like an IFS Copy Object row.'; return; }
-    if (rec.lu !== 'ExpenseDetail') { st.textContent = `This row is from ${rec.lu}, not Expense Details.`; return; }
-    const seen = rec.fields.find(f => f.name === 'SHORT_NAME')?.value?.trim();
-    if (seen && !(s.knownShortNames || []).includes(seen)) s.knownShortNames = [...(s.knownShortNames || []), seen];
-    for (const f of rec.fields) if (['EXPENSE_ID', 'ACCOUNT_DATE', 'EXPENSE_CODE', 'DESCRIPTION', 'REFERENCE', 'CURRENCY_CODE', 'GROSS_CURR_AMOUNT', 'SEQ_NO', 'SHORT_NAME', 'C_SHORT_NAME'].includes(f.name)) f.value = '';
-    s.expenseTemplate = rebuildTemplate(rec); expTemplate.value = s.expenseTemplate; st.textContent = `Template updated${seen ? `, project short name ${seen} remembered` : ''}. Save to keep it.`;
-  } }, 'Import row');
-  root.append(el('section', {}, el('h3', {}, 'Expenses'),
-    el('div', { class: 'grid2' }, field('Default currency', defCur), field('Cost objects (comma separated)', costList, 'The "Person" column of the workbook: /Personal 1, /16 QP 16 …')),
-    el('div', { class: 'grid3' },
-      field('Home currency', el('select', { onchange: e => { s.homeCurrency = e.target.value; } }, s.currencies.map(c => el('option', { value: c, selected: c === (s.homeCurrency || 'TRY') ? 'selected' : null }, c))), 'Lines in this currency are exported with currency rate 1.'),
-      field('Rate for other currencies', el('select', { onchange: e => { s.rateSource = e.target.value; } }, [['tcmb', 'Central Bank (TCMB) rate for each line’s date'], ['manual', 'Rate typed per sheet under Sheets…']].map(([v, l]) => el('option', { value: v, selected: v === (s.rateSource || 'tcmb') ? 'selected' : null }, l))), 'Uses the PC rate service when available, then the daily rate files. Check that the selected rate column matches the rate required for your IFS sheet.'),
-      field('TCMB column IFS uses', el('select', { onchange: e => { s.tcmbField = e.target.value; } }, [['ForexBuying', 'Döviz alış (forex buying)'], ['ForexSelling', 'Döviz satış (forex selling)'], ['BanknoteBuying', 'Efektif alış (banknote buying)'], ['BanknoteSelling', 'Efektif satış (banknote selling)']].map(([v, l]) => el('option', { value: v, selected: v === (s.tcmbField || 'ForexBuying') ? 'selected' : null }, l))), 'Check once against a line IFS has already rated and pick the column that matches.')),
-    el('div', { class: 'grid2' },
-      field('When no rate is known', el('select', { onchange: e => { s.currRateMode = e.target.value; } }, [['blank', 'Send the field empty'], ['omit', 'Leave the field out of the pasted row'], ['one', 'Always 1 (old workbook behaviour)']].map(([v, l]) => el('option', { value: v, selected: v === (s.currRateMode || 'blank') ? 'selected' : null }, l))), 'Only matters for lines whose rate could not be fetched or typed.'),
-      field('Per diem defaults', txt((s.perDiemDefaults || []).map(d => `${d.country}=${d.rate} ${d.currency}`).join(', '), { spellcheck: 'false', placeholder: 'USA=70 USD, Germany=50 EUR', oninput: e => { s.perDiemDefaults = e.target.value.split(',').map(x => x.trim()).filter(Boolean).map(x => { const m = /^(.+?)\s*=\s*([\d.,]+)\s*([A-Za-z]{3})?$/.exec(x); return m ? { country: m[1].trim(), rate: Number(m[2].replace(',', '.')), currency: (m[3] || s.defaultCurrency || 'USD').toUpperCase() } : null; }).filter(Boolean); } }), 'Prefills a new trip by country. Saving a trip with a rate updates the default for its country.')),
-    el('div', { class: 'grid2' },
-      field('Expense activity suffix', txt(s.expenseActivitySuffix, { spellcheck: 'false', oninput: e => { s.expenseActivitySuffix = e.target.value.trim(); } }), 'Suggests PROJECT.<suffix> as the project short name for every mapped project, e.g. 210701.0105.0105-A.'),
-      field('Known project short names', txt((s.knownShortNames || []).join(', '), { spellcheck: 'false', oninput: e => { s.knownShortNames = e.target.value.split(',').map(x => x.trim()).filter(Boolean); } }), 'Offered as chips on sheets and lines.')),
-    expImport, el('div', { class: 'row' }, expImportBtn, el('span', { id: 'exp-import-status', class: 'muted' })),
-    el('details', {}, el('summary', {}, 'Expense row template used for export'), expTemplate),
-    el('h4', {}, 'Backup and export'),
-    el('p', { class: 'muted' }, backupAvailable()
-      ? 'Every change is also saved to the data folder next to the app on this PC (OneDrive), and restored automatically if the browser store is ever empty. Supabase sync adds the phone on top.'
-      : 'Your expenses live in this browser (and in Supabase once sync is on). Keep a copy now and then.'),
-    backupAvailable() ? el('div', { class: 'row' }, el('span', { id: 'pc-backup-state', class: 'muted' }, 'Checking the PC backup…'), el('button', { onclick: async () => { const r = await pushBackup(); $('#pc-backup-state').textContent = r?.error ? `Backup failed: ${r.error}` : `Backed up ${new Date(r.at).toLocaleString()}`; } }, 'Back up now')) : null,
-    el('div', { class: 'row' },
-      el('button', { onclick: () => exportCsv().then(() => toast('CSV downloaded')) }, 'Export all expenses (CSV)'),
-      el('button', { onclick: () => backupJson().then(() => toast('Backup downloaded (includes settings and keys)')) }, 'Backup (JSON, with settings and keys)'),
-      el('label', { class: 'inline' }, el('span', { class: 'link' }, 'Restore from backup…'), el('input', { type: 'file', accept: 'application/json', hidden: true, onchange: async e => { const f = e.target.files[0]; if (!f) return; try { const n = await restoreJson(await f.text()); settings = loadSettings(); toast(`Restored ${n} records`); renderSettings(); } catch (err) { toast(`Restore failed: ${err.message}`); } } })))));
-
-  // Identity
-  const idn = s.identity;
-  root.append(el('section', {}, el('h3', {}, 'IFS identity'),
-    el('div', { class: 'grid3' },
-      field('Company', txt(idn.companyId, { oninput: e => { idn.companyId = e.target.value.trim(); } })),
-      field('Employee no', txt(idn.empNo, { oninput: e => { idn.empNo = e.target.value.trim(); } })),
-      field('Resource seq', txt(idn.resourceSeq, { oninput: e => { idn.resourceSeq = e.target.value.trim(); } })),
-      field('Resource id', txt(idn.resourceId, { oninput: e => { idn.resourceId = e.target.value.trim(); } })),
-      field('Name', txt(idn.resourceName, { oninput: e => { idn.resourceName = e.target.value; } })),
-      field('Time zone', txt(s.timeZone, { oninput: e => { s.timeZone = e.target.value.trim(); } })))));
-
-  // Some fields update the draft on input; collect the deferred controls too, without saving.
-  function collectSettings() {
-    const next = structuredClone(s), apiKey = key.value.trim();
-    if (apiKey !== next.clockify.apiKey) next.clockify = { ...next.clockify, apiKey, userId: '', workspaceId: '', userName: '' };
-    next.regularHours = Number(reg.value) || 9; next.travelAfterHours = Number(trAfter.value) || next.regularHours;
-    next.roundStep = Number(step.value) || 0.5; next.roundMode = mode.value; next.topUpMinimum = topUp.checked;
-    next.holidays = hol.value.split(/[\s,;]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
-    next.travelKeyword = kw.value.trim();
-    next.codes = { regular: cReg.value.trim(), ot15: c15.value.trim(), ot2: c2.value.trim(), travel: cTr.value.trim(), travelRegular: cTrR.value.trim() };
-    next.codeDescriptions = { ...next.codeDescriptions, [next.codes.regular]: dReg.value, [next.codes.ot15]: d15.value, [next.codes.ot2]: d2.value, [next.codes.travel]: dTr.value, [next.codes.travelRegular]: dTrR.value };
-    return next;
-  }
-  const saveBtn = el('button', { class: 'primary', onclick: () => {
-    try {
-      assertScopeCurrent();
-      const next = collectSettings();
       saveSettings(next, { strict: true });
-      changeClockifyKey(next.clockify.apiKey);
-      // Mapping and identity inputs retain references to these objects after Save.
-      next.mapping.forEach((value, index) => {
-        const row = settings.mapping[index], travel = row.travel;
-        Object.assign(row, value);
-        if (travel && value.travel) { Object.assign(travel, value.travel); row.travel = travel; }
-      });
-      next.timeCodeMappings?.forEach((value, index) => Object.assign(settings.timeCodeMappings[index], value));
-      Object.assign(settings, next, { identity: settings.identity, mapping: settings.mapping, ...(settings.timeCodeMappings ? { timeCodeMappings: settings.timeCodeMappings } : {}) });
+      settings = next;
+      ++clockifyConnectId;
       invalidateClockifyView();
-      saveStatus.textContent = 'Saved.';
-    } catch (err) { if (scopeIsCurrent()) saveStatus.textContent = `Save failed: ${err.message}`; }
-  } }, 'Save settings');
-  const resetBtn = confirmButton(currentScope().workspace === 'personal' ? 'Reset spending preferences' : 'Reset rules and mapping to defaults', () => { const keep = { clockify: settings.clockify, supabase: settings.supabase }; settings = { ...defaultsForScope(), ...keep }; saveSettings(settings); renderSettings(); toast('Defaults restored. Keys kept.'); }, { armedLabel: 'Reset? Tap again to confirm', className: 'link' });
-  const saveStatus = el('span', { id: 'save-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
-  root.append(el('div', { class: 'settings-reset' }, resetBtn));
-  // Personal exposes spending preferences; work-only connections and IFS fields stay in Work.
-  if (currentScope().workspace === 'personal') {
-    for (const section of [...root.querySelectorAll('section')]) {
-      const title = section.querySelector('h3')?.textContent;
-      if (['Pay estimate', 'Clockify', 'Time calculation and tags', 'Clockify project → IFS activity', 'IFS identity'].includes(title)) section.remove();
-      if (title === 'Expenses') {
-        const nodes = [...section.children], index = nodes.findIndex(n => n.tagName === 'H4' && n.textContent === 'Backup and export');
-        section.replaceChildren(el('h3', {}, 'Spending preferences'), field('Default currency', defCur), ...(index < 0 ? [] : nodes.slice(index)));
-      }
-    }
-  }
-  // Fold every section; the ones that still need attention start open, the rest remember your choice.
-  const c = supabaseClient();
-  const needs = { Clockify: !settings.clockify.apiKey, 'Import and export settings': true, 'Time calculation and tags': true };
-  const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Account and sync': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
-  for (const sec of root.querySelectorAll('section')) {
-    const h3 = sec.querySelector('h3'); if (!h3) continue;
-    const title = h3.textContent;
-    const key = scopedKey('ifsbridge.settings.open.' + title.replace(/\W+/g, '_').slice(0, 30));
-    let saved = null; try { saved = localStorage.getItem(key); } catch {}
-    const open = saved ? saved === 'open' : !!needs[title];
-    const det = el('details', { class: 'set-fold', open }, el('summary', {}, el('span', {}, title), stateOf[title] ? el('small', {}, stateOf[title]) : null));
-    h3.remove();
-    while (sec.firstChild) det.append(sec.firstChild);
-    sec.append(det);
-    det.addEventListener('toggle', () => { try { localStorage.setItem(key, det.open ? 'open' : 'closed'); } catch {} });
-  }
-  // Give Save its own space below the scrolling fields, so it never covers a fold.
-  const fields = el('div', { class: 'settings-fields', role: 'region', 'aria-label': 'Settings fields', tabindex: '0' });
-  while (root.firstChild) fields.append(root.firstChild);
-  for (const event of ['input', 'change']) fields.addEventListener(event, e => {
-    if (e.target !== fileInput && e.target !== includeKey) {
-      invalidateClockifyView({ keepMetadata: true });
-      saveStatus.textContent = 'Unsaved changes';
-    }
+      toast('Settings saved');
+    },
+    openAccount, connectionStatusPanel: () => connectionStatusPanel({ showAccountLink: false }),
+    getTheme: currentTheme, setTheme: applyTheme, defaults: defaultsForScope,
+    exportRecords: exportCsv, backupRecords: backupJson,
+    restoreRecords: async text => { const n = await restoreJson(text); assertScopeCurrent(); settings = loadSettings(); invalidateClockifyView(); toast(`Restored ${n} records`); },
+    backupAvailable, pushBackup
   });
-  root.append(fields, el('div', { class: 'actions settings-save' }, saveBtn, saveStatus));
-  if (backupAvailable()) backupMeta().then(m => { const e = $('#pc-backup-state'); if (e) e.textContent = m?.savedAt ? `Last PC backup ${new Date(m.savedAt).toLocaleString()} (${Math.max(1, Math.round(m.bytes / 1024))} KB) in ${m.path}` : 'No PC backup yet.'; });
+  if (!$('#tab-settings').childElementCount) settingsPage.mount($('#tab-settings'), group, focus);
+  else if (group) settingsPage.navigate(group, focus);
 }
-
-// This panel only reads Clockify. Every time-code meaning needs the owner's
-// confirmation, so a bank-style suggestion can never become a payroll rule.
-function renderTimeCodeSettings(s, connection, onModeChange = () => {}) {
-  // Convert the old tag fields into the same editable list. The version marker
-  // prevents removed mappings from reappearing from deprecated settings.tags.
-  const migrated = s.timeCodeMappingsVersion !== 2;
-  s.timeCodeMappings = effectiveTimeCodeMappings(s);
-  s.timeCodeMappingsVersion = 2;
-  s.timeCalculationMode = calculationMode(s);
-  const referenceCodes = TIME_CODE_CATALOG.map(item => [item.code, item.label]);
-  let descriptions = new Map();
-  const status = el('p', { id: 'time-code-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
-  const list = el('datalist', { id: 'clockify-tag-choices' });
-  const catalog = el('datalist', { id: 'ifs-time-code-choices' });
-  const rows = el('div', { id: 'time-code-rows' });
-  const field = (name, input) => el('label', { class: 'field' }, el('span', {}, name), input);
-  const section = el('section', {}, el('h3', {}, 'Time calculation and tags'));
-  const controls = el('div', { id: 'time-calculation-controls' });
-  const calculation = el('select', { id: 'time-calculation-mode', 'aria-label': 'Calculate time using' },
-    [['rules', 'Automatic rules'], ['tags', 'Clockify tags']].map(([value, label]) => el('option', { value, selected: s.timeCalculationMode === value }, label)));
-  const modeHelp = el('p', { id: 'time-calculation-help', class: 'help' });
-  let request = 0;
-  const edited = () => { invalidateClockifyView({ keepMetadata: true }); if ($('#save-status')) $('#save-status').textContent = 'Unsaved changes'; };
-  const describeMode = () => {
-    modeHelp.textContent = calculation.value === 'tags'
-      ? 'Each confirmed tag selects its exact IFS code. Untagged or label-only entries use regular time. Rounding still applies; no automatic overtime, travel-by-description, minimum day or paid-rest additions.'
-      : 'Daily hours, weekends and travel thresholds calculate ordinary work. The same tag list supplies overtime/travel meanings. Leave and holiday codes keep their recorded hours on General.';
-  };
-  calculation.addEventListener('change', () => { s.timeCalculationMode = calculation.value; describeMode(); onModeChange(calculation.value); edited(); refresh(); });
-  // These names and meanings were supplied by the owner. Propose them visibly;
-  // preserve existing choices and require Confirm + Save before use.
-  const suggestLeave = row => {
-    if (row.code || row.mode === 'label') return;
-    const code = ({ 'annual leave': 'F_08', holiday: 'F_07' })[(row.tagName || '').trim().toLowerCase()];
-    if (!code) return;
-    row.mode = 'code'; row.code = code; row.description ||= timeCodeInfo(code).description;
-    row.confirmed = false;
-  };
-  const refreshCatalog = () => {
-    // Preserve the exact description prefix shown in IFS when filling a draft.
-    const choices = new Map(referenceCodes.map(([code, label]) => [code, `${code} / ${label}`]));
-    for (const [code, description] of Object.entries(s.codeDescriptions || {})) choices.set(code, description);
-    descriptions = new Map(choices);
-    for (const item of s.timeCodeCatalog || []) descriptions.set(item.code, item.description);
-    for (const item of s.timeCodeCatalog || []) choices.set(item.code, `${item.description} (${item.source === 'ifs-copy' ? 'copied from IFS' : item.source})`);
-    catalog.replaceChildren(...[...choices].map(([code, description]) => el('option', { value: code }, description)));
-  };
-  const refresh = () => {
-    list.replaceChildren(...(clockifyTags || []).map(tag => el('option', { value: tag.name }, tag.archived ? 'Archived' : tag.name)));
-    const mappings = s.timeCodeMappings || [];
-    rows.replaceChildren(...mappings.map((row, index) => {
-      const name = el('input', { value: row.tagName || '', list: 'clockify-tag-choices', 'aria-label': `Clockify tag ${index + 1}` });
-      const kind = el('select', { 'aria-label': `Use of tag ${index + 1}` }, [['review', 'Choose meaning…'], ['code', 'IFS time code'], ['label', 'Label only']].map(([value, text]) => el('option', { value, selected: (row.mode || 'review') === value }, text)));
-      const code = el('input', { value: row.code || '', list: 'ifs-time-code-choices', maxlength: '40', placeholder: 'Copy the code from IFS', 'aria-label': `IFS code ${index + 1}` });
-      const description = el('input', { value: row.description || '', placeholder: 'Description shown in IFS', 'aria-label': `IFS description ${index + 1}` });
-      const multiplier = el('input', { type: 'number', value: row.payMultiplier ?? '', min: '0', max: '10', step: '0.25', placeholder: 'Unknown', 'aria-label': `Pay multiplier ${index + 1}` });
-      const rowStatus = el('span', { class: 'muted', role: 'status' }, row.confirmed ? 'Confirmed' : 'Needs confirmation');
-      const scopeHint = el('small', { class: 'help time-code-scope' });
-      const describeScope = () => {
-        const info = timeCodeInfo(row.code);
-        scopeHint.textContent = row.mode !== 'code' ? '' : info?.scope === 'general-only'
-          ? 'General only · routes to your configured IFS General activity, including entries logged against another mapped Clockify project.'
-          : info ? `Work or General · ${calculation.value === 'tags' ? 'uses this exact code' : 'ordinary work follows automatic rules; F_11 stays exact'}.`
-          : 'This code is outside the supplied IFS lists. Choose one of the 11 documented codes.';
-      };
-      let suggestedDescription = row.description === descriptions.get(row.code) ? row.description : '';
-      const reset = () => { row.confirmed = false; rowStatus.textContent = 'Needs confirmation'; edited(); };
-      name.addEventListener('input', () => { row.tagName = name.value.trim(); row.tagId = (clockifyTags || []).find(tag => tag.name === row.tagName)?.id || ''; reset(); });
-      kind.addEventListener('change', () => { row.mode = kind.value; code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code'; describeScope(); reset(); });
-      code.addEventListener('input', () => {
-        row.code = code.value.trim();
-        const known = descriptions.get(row.code);
-        // Choosing a code can fill its description, but never replaces custom text,
-        // chooses a tag, confirms a meaning or invents a pay multiplier.
-        if (known && (!row.description || row.description === suggestedDescription)) {
-          row.description = description.value = known; suggestedDescription = known;
-        }
-        describeScope(); reset();
-      });
-      description.addEventListener('input', () => { row.description = description.value.trim(); reset(); });
-      multiplier.addEventListener('input', () => { row.payMultiplier = multiplier.value === '' ? null : Number(multiplier.value); reset(); });
-      code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code';
-      const confirm = el('button', { class: 'time-code-confirm', onclick: () => {
-        assertScopeCurrent();
-        if (!row.tagName || !['code', 'label'].includes(row.mode)) { rowStatus.textContent = 'Choose a tag and its meaning first.'; return; }
-        if (row.mode === 'code' && !timeCodeInfo(row.code)) { rowStatus.textContent = 'Choose an IFS report code from the 11 documented codes first.'; return; }
-        if (row.mode === 'code' && row.payMultiplier != null && (!Number.isFinite(row.payMultiplier) || row.payMultiplier < 0 || row.payMultiplier > 10)) { rowStatus.textContent = 'Use a pay multiplier from 0 to 10, or leave it unknown.'; return; }
-        const info = timeCodeInfo(row.code);
-        if (row.mode === 'code' && calculation.value === 'rules' && info?.scope === 'work' && row.code !== 'F_11' && row.payMultiplier != null && row.payMultiplier !== info.payMultiplier) { rowStatus.textContent = 'Automatic rules use the standard work multiplier. Leave this blank, use its standard value, or choose Clockify tags mode for a custom multiplier.'; return; }
-        if (mappings.some(other => other !== row && (other.tagName === row.tagName || (row.tagId && other.tagId === row.tagId)))) { rowStatus.textContent = 'This tag has another mapping. Keep one mapping per tag.'; return; }
-        row.confirmed = true; rowStatus.textContent = 'Confirmed · Save settings to keep it'; edited();
-      } }, 'Confirm meaning');
-      describeScope();
-      return el('div', { class: 'time-code-row', style: 'padding:12px 0;border-bottom:1px solid var(--border)' },
-        el('div', { class: 'grid3' }, field('Clockify tag', name), field('Use this tag as', kind), field('IFS report code', code), field('IFS description', description), field('Pay multiplier (optional)', multiplier)),
-        scopeHint,
-        el('div', { class: 'row' }, confirm, rowStatus, el('button', { class: 'link', onclick: () => { assertScopeCurrent(); s.timeCodeMappings.splice(index, 1); edited(); refresh(); } }, 'Remove mapping')));
-    }));
-    if (!mappings.length) rows.append(el('p', { class: 'muted' }, 'Read your Clockify tags to map their codes, or add a tag manually.'));
-  };
-  const syncTags = el('button', { id: 'sync-clockify-tags', onclick: async () => {
-    const connected = connection(), id = ++request;
-    if (!connected.apiKey || !connected.workspaceId || connected.enteredKey !== connected.apiKey) { status.textContent = 'Connect and save your Clockify API key first.'; return; }
-    assertScopeCurrent(); syncTags.disabled = true; status.textContent = 'Reading all Clockify tags…';
-    try {
-      const tags = await new Clockify(connected.apiKey).tags(connected.workspaceId);
-      const current = connection();
-      if (!scopeIsCurrent() || !section.isConnected || id !== request || current.apiKey !== connected.apiKey || current.enteredKey !== connected.apiKey || current.workspaceId !== connected.workspaceId) return;
-      clockifyTags = tags;
-      s.timeCodeMappings ||= [];
-      let added = 0;
-      for (const tag of tags) {
-        const existing = s.timeCodeMappings.find(row => row.tagId && row.tagId === tag.id)
-          || s.timeCodeMappings.find(row => row.tagName === tag.name);
-        if (existing) {
-          if (existing.tagId === tag.id && existing.tagName !== tag.name) { existing.tagName = tag.name; existing.confirmed = false; added++; }
-          // A deleted/recreated tag can have the same name and a new identity.
-          // Keep its proposed code, but require a new confirmation before use.
-          if (existing.tagId && existing.tagId !== tag.id) { existing.tagId = tag.id; existing.confirmed = false; added++; }
-          if (!existing.tagId) existing.tagId = tag.id;
-          suggestLeave(existing);
-          continue;
-        }
-        const draft = { tagId: tag.id, tagName: tag.name, mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null };
-        suggestLeave(draft); s.timeCodeMappings.push(draft); added++;
-      }
-      refresh(); edited();
-      status.textContent = `${tags.length} tags read. ${s.timeCodeMappings.filter(row => !row.confirmed).length} mappings need confirmation. All overtime, travel and leave tags are managed in this list. Save settings to keep changes.`;
-    } catch (error) { if (scopeIsCurrent() && section.isConnected && id === request) status.textContent = `Tag sync failed: ${error.message}`; }
-    finally { syncTags.disabled = false; }
-  } }, 'Read Clockify tags');
-  section.append(field('Calculate time using', calculation), modeHelp, controls,
-    migrated && s.timeCodeMappings.length ? el('p', { class: 'help' }, 'Your previous overtime/travel tag settings are now in this list. Save settings to keep the unified setup.') : '',
-    el('p', { class: 'muted' }, 'One list for every tag. Reading Clockify only refreshes names; confirm new or changed meanings, then Save settings.'),
-    el('div', { class: 'row' }, syncTags, el('button', { id: 'add-time-code', onclick: () => { assertScopeCurrent(); (s.timeCodeMappings ||= []).push({ tagId: '', tagName: '', mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null }); edited(); refresh(); } }, 'Add tag manually')), status,
-    el('p', { class: 'help' }, 'Annual leave → F_08 / Yıllık İzin. Holiday → F_07 / Resmi Tatil. These and F_04–F_06 use General only. Configure one General activity below; missing or ambiguous destinations block export.'),
-    el('details', { class: 'more-opts' }, el('summary', {}, 'IFS code reference · 11 codes'),
-      el('p', { class: 'help' }, 'Your IFS lists: normal projects allow six work codes; General also allows the five leave/absence codes. Saved descriptions and copied IFS rows take precedence.'),
-      el('table', { class: 'ifs-code-reference' },
-        el('thead', {}, el('tr', {}, el('th', {}, 'Code'), el('th', {}, 'Description'), el('th', {}, 'Where'))),
-        el('tbody', {}, TIME_CODE_CATALOG.map(item => el('tr', {}, el('td', {}, item.code), el('td', {}, item.label), el('td', {}, item.scope === 'general-only' ? 'General only' : 'Work or General')))))),
-    el('p', { class: 'help' }, 'An optional pay multiplier affects estimates only. Work codes use their documented multiplier when blank; leave and holiday pay remain unknown.'), list, catalog, rows);
-  refreshCatalog(); describeMode(); refresh();
-  return { section, refreshCatalog, controls };
-}
-
-function rebuildTemplate(rec) {
-  return ['!IFS.COPYOBJECT', `$LU=${rec.lu}`, `$VIEW=${rec.view}`, '$RECORD=!', ...rec.fields.map(f => `-$${f.n}:${f.name}=${f.value}`), '-'].join('\n');
+function openSettings(group = 'time', focus) {
+  if (group === 'expenses') group = 'spending';
+  showTab('settings'); renderSettings(group, focus);
 }
 
 // ---------- boot ----------
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
-  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settings = null; settingsImportUndo = null; } });
+  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settingsPage?.dispose(); settingsPage = null; settings = null; } });
   if (!admitted) return;
   settings = loadSettings();
   const navigation = document.querySelector('.top');
@@ -1027,18 +546,21 @@ async function boot() {
     settings: () => settings,
     sync: () => scheduleSync(0),
     refresh: () => showTab(document.querySelector('.tabs button.active')?.dataset.tab || 'overview'),
-    openExpenses: kind => { showTab('expenses'); showExpenseAttention(kind); },
+    openSettings,
+    reviewExpenses: kind => { showTab('expenses'); openExpenseReview(kind); },
+    reviewPersonal: kind => { showTab('expenses'); reviewPersonal(kind); },
     reviewWeek: monday => { $('#week-monday').value = monday; week = null; showTab('week'); }
   });
   const personal = currentScope().workspace === 'personal';
   document.querySelector('.tabs button[data-tab="week"]').hidden = personal;
-  initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), scope: currentScope, el, $ });
+  document.querySelector('.tabs button[data-tab="study"]').hidden = !personal;
+  initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), scope: currentScope, el, $, openSettings });
   initReport({ settings: () => settings, saveSettings: s => saveSettings(s) });
-  initPersonal({ settings: () => settings, navigateTransactions: () => showTab('expenses') });
+  initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view) });
   $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
   $('#btn-bulk').addEventListener('click', openBulkDialog);
   if (!personal && settings.clockify.apiKey) renderWeekStrip();
-  await initLocalBackup({ onRestored: () => { settings = loadSettings(); } });
+  await initLocalBackup({ onRestored: () => { settingsPage?.dispose(); settingsPage = null; settings = loadSettings(); invalidateClockifyView(); } });
   assertScopeCurrent();
   for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
   $('#week-monday').value = mondayOf(shiftMonday(todayIso(), -7));

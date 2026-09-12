@@ -9,7 +9,7 @@ const pages = {
 
 export function updateShell(name) {
   const personal = currentScope().workspace === 'personal';
-  const labels = personal ? { ...pages, overview: 'Monthly spending', expenses: 'Transactions' } : pages;
+  const labels = personal ? { overview: 'Summary', expenses: 'Transactions', study: 'Study', settings: 'Settings' } : pages;
   const page = labels[name] || labels.overview;
   document.body.dataset.workspace = personal ? 'personal' : 'work';
   const heading = document.getElementById('page-title');
@@ -19,12 +19,16 @@ export function updateShell(name) {
   if (brandMark) brandMark.textContent = personal ? 'P' : 'IFS';
   if (brandName) brandName.textContent = personal ? 'Pocket' : 'Bridge';
   for (const button of document.querySelectorAll('.tabs button')) {
+    button.hidden = !Object.hasOwn(labels, button.dataset.tab);
     const label = button.querySelector('span');
-    if (label) label.textContent = labels[button.dataset.tab];
-    document.getElementById(`tab-${button.dataset.tab}`)?.setAttribute('aria-label', labels[button.dataset.tab]);
+    if (label && labels[button.dataset.tab]) label.textContent = labels[button.dataset.tab];
+    if (labels[button.dataset.tab]) document.getElementById(`tab-${button.dataset.tab}`)?.setAttribute('aria-label', labels[button.dataset.tab]);
     if (button.dataset.tab === name) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   }
+  // A single navigation order for each workspace, including its phone layout.
+  const order = personal ? ['overview', 'expenses', 'study', 'settings'] : ['overview', 'week', 'expenses', 'settings'];
+  for (const name of order) { const button = document.querySelector(`.tabs button[data-tab="${name}"]`); if (button) button.parentElement.append(button); }
 }
 
 export function initShell() {

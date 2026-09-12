@@ -16,6 +16,9 @@
 <link rel="stylesheet" href="./css/auth.css">
 <link rel="stylesheet" href="./css/bank-import.css">
 <link rel="stylesheet" href="./css/personal-study.css">
+<link rel="stylesheet" href="./css/settings.css">
+<link rel="stylesheet" href="./css/settings-time.css">
+<link rel="stylesheet" href="./css/review.css">
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to content</a>
@@ -30,6 +33,7 @@
     <button type="button" data-tab="overview" aria-controls="tab-overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Overview</span></button>
     <button type="button" data-tab="week" aria-controls="tab-week"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18m-14 4h3m4 0h3m-10 3h3"/></svg><span>Timesheets</span></button>
     <button type="button" data-tab="expenses" aria-controls="tab-expenses"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Zm3 5h6m-6 4h6m-6 4h3"/></svg><span>Expenses</span></button>
+    <button type="button" data-tab="study" aria-controls="tab-study" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10m8 10V4m8 16v-7"/></svg><span>Study</span></button>
     <button type="button" data-tab="settings" aria-controls="tab-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>Settings</span></button>
   </nav>
 </header>
@@ -48,6 +52,7 @@
   </section>
   <section id="tab-expenses" class="tab" aria-label="Expenses" hidden></section>
   <section id="tab-overview" class="tab" aria-label="Overview" hidden></section>
+  <section id="tab-study" class="tab" aria-label="Spending study" hidden></section>
   <section id="tab-settings" class="tab" aria-label="Settings" hidden></section>
 </main>
 <noscript><p class="empty">Enable JavaScript to use IFS Bridge.</p></noscript>
