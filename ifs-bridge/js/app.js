@@ -854,6 +854,16 @@ function renderSettings() {
 // This panel only reads Clockify. Every time-code meaning needs the owner's
 // confirmation, so a bank-style suggestion can never become a payroll rule.
 function renderTimeCodeSettings(s, connection) {
+  // Reference choices from the owner's IFS report-code screenshot (13 Sep 2026).
+  // Availability was shown for one activity; this never changes project mappings.
+  const referenceCodes = [
+    ['F_01', 'Travel Regular Time'], ['F_02', 'Over Time (OT) x 1.5'],
+    ['F_03', 'Regular Time (Normal Calisma)'], ['F_04', 'Ücretli İzin'],
+    ['F_05', 'Ücretsiz İzin'], ['F_06', 'Raporlu'], ['F_07', 'Resmi Tatil'],
+    ['F_08', 'Yıllık İzin'], ['F_10', 'Over Time (OT) x 2'],
+    ['F_11', 'Over Time (ST) x 1'], ['F_12', 'Travel Over Time (ST) x 1']
+  ];
+  let descriptions = new Map();
   const status = el('p', { id: 'time-code-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
   const list = el('datalist', { id: 'clockify-tag-choices' });
   const catalog = el('datalist', { id: 'ifs-time-code-choices' });
@@ -863,10 +873,11 @@ function renderTimeCodeSettings(s, connection) {
   let request = 0;
   const edited = () => { if ($('#save-status')) $('#save-status').textContent = 'Unsaved changes'; };
   const refreshCatalog = () => {
-    // F_07 is documented in this project's IFS design notes. It is a choice,
-    // never an assignment. The annual-leave code is deliberately unknown.
-    const choices = new Map([['F_07', 'Resmi Tatil — documented suggestion; confirm against IFS']]);
+    // Preserve the exact description prefix shown in IFS when filling a draft.
+    const choices = new Map(referenceCodes.map(([code, label]) => [code, `${code} / ${label}`]));
     for (const [code, description] of Object.entries(s.codeDescriptions || {})) choices.set(code, description);
+    descriptions = new Map(choices);
+    for (const item of s.timeCodeCatalog || []) descriptions.set(item.code, item.description);
     for (const item of s.timeCodeCatalog || []) choices.set(item.code, `${item.description} (${item.source === 'ifs-copy' ? 'copied from IFS' : item.source})`);
     catalog.replaceChildren(...[...choices].map(([code, description]) => el('option', { value: code }, description)));
   };
@@ -880,10 +891,20 @@ function renderTimeCodeSettings(s, connection) {
       const description = el('input', { value: row.description || '', placeholder: 'Description shown in IFS', 'aria-label': `IFS description ${index + 1}` });
       const multiplier = el('input', { type: 'number', value: row.payMultiplier ?? '', min: '0', max: '10', step: '0.25', placeholder: 'Unknown', 'aria-label': `Pay multiplier ${index + 1}` });
       const rowStatus = el('span', { class: 'muted', role: 'status' }, row.confirmed ? 'Confirmed' : 'Needs confirmation');
+      let suggestedDescription = row.description === descriptions.get(row.code) ? row.description : '';
       const reset = () => { row.confirmed = false; rowStatus.textContent = 'Needs confirmation'; edited(); };
       name.addEventListener('input', () => { row.tagName = name.value.trim(); row.tagId = (clockifyTags || []).find(tag => tag.name === row.tagName)?.id || ''; reset(); });
       kind.addEventListener('change', () => { row.mode = kind.value; code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code'; reset(); });
-      code.addEventListener('input', () => { row.code = code.value.trim(); reset(); });
+      code.addEventListener('input', () => {
+        row.code = code.value.trim();
+        const known = descriptions.get(row.code);
+        // Choosing a code can fill its description, but never replaces custom text,
+        // chooses a tag, confirms a meaning or invents a pay multiplier.
+        if (known && (!row.description || row.description === suggestedDescription)) {
+          row.description = description.value = known; suggestedDescription = known;
+        }
+        reset();
+      });
       description.addEventListener('input', () => { row.description = description.value.trim(); reset(); });
       multiplier.addEventListener('input', () => { row.payMultiplier = multiplier.value === '' ? null : Number(multiplier.value); reset(); });
       code.disabled = description.disabled = multiplier.disabled = row.mode !== 'code';
@@ -929,7 +950,12 @@ function renderTimeCodeSettings(s, connection) {
   } }, 'Sync Clockify tags');
   section.append(el('p', { class: 'muted' }, 'Clockify supplies tag names, not IFS codes. Choose what each additional tag means. New or changed meanings need your confirmation before hours can be exported.'),
     el('div', { class: 'row' }, syncTags, el('button', { id: 'add-time-code', onclick: () => { assertScopeCurrent(); (s.timeCodeMappings ||= []).push({ tagId: '', tagName: '', mode: 'review', code: '', description: '', confirmed: false, payMultiplier: null }); edited(); refresh(); } }, 'Add tag manually')), status,
-    el('p', { class: 'help' }, 'Resmi Tatil: F_07 is a documented suggestion. Yıllık izin: copy an annual-leave row from IFS below to learn its code. No code is assigned automatically.'),
+    el('p', { class: 'help' }, 'Your IFS list confirms F_07 = Resmi Tatil and F_08 = Yıllık İzin. Choose each tag’s code and confirm its meaning; assignments and pay multipliers are not automatic.'),
+    el('details', { class: 'more-opts' }, el('summary', {}, 'IFS code reference · 11 codes'),
+      el('p', { class: 'help' }, 'From your IFS screenshot. Availability can depend on the selected project/activity. Saved descriptions and copied IFS rows take precedence.'),
+      el('table', { class: 'ifs-code-reference' },
+        el('thead', {}, el('tr', {}, el('th', {}, 'Code'), el('th', {}, 'Description'))),
+        el('tbody', {}, referenceCodes.map(([code, label]) => el('tr', {}, el('td', {}, code), el('td', {}, label)))))),
     el('p', { class: 'help' }, 'Direct codes use the recorded hours with rounding, without weekend overtime or a minimum-day top-up. A day containing direct-code time gets no automatic minimum top-up. An optional pay multiplier affects estimates only; leave it blank when unknown.'), list, catalog, rows);
   refreshCatalog(); refresh();
   return { section, refreshCatalog };
