@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-auth="locked">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>IFS Bridge</title>
 <meta name="theme-color" content="#0E6B87">
 <script>try{var t=localStorage.getItem('ifsbridge.theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}</script>
@@ -11,38 +11,47 @@
 <link rel="apple-touch-icon" href="./icons/icon-192.png">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="./css/app.css">
+<link rel="stylesheet" href="./css/expense-tools.css">
+<link rel="stylesheet" href="./css/personal.css">
+<link rel="stylesheet" href="./css/auth.css">
+<link rel="stylesheet" href="./css/bank-import.css">
+<link rel="stylesheet" href="./css/personal-study.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand"><span class="mark">IFS</span> Bridge</div>
-  <nav class="tabs">
-    <button data-tab="week">Week</button>
-    <button data-tab="expenses">Expenses</button>
-    <button data-tab="overview">Overview</button>
-    <button data-tab="settings">Settings</button>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<section id="auth-screen" class="auth-screen" aria-label="Sign in"><p role="status">Opening sign in…</p></section>
+<header class="top" hidden inert>
+  <div class="brand-row">
+    <div class="brand"><span class="mark">IFS</span><span>Bridge</span></div>
+    <select id="workspace-select" aria-label="Workspace"><option value="work">Work</option><option value="personal">Personal</option></select>
+    <button type="button" id="account-button">Account</button>
+  </div>
+  <nav class="tabs" aria-label="Main navigation">
+    <button type="button" data-tab="overview" aria-controls="tab-overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Overview</span></button>
+    <button type="button" data-tab="week" aria-controls="tab-week"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18m-14 4h3m4 0h3m-10 3h3"/></svg><span>Timesheets</span></button>
+    <button type="button" data-tab="expenses" aria-controls="tab-expenses"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Zm3 5h6m-6 4h6m-6 4h3"/></svg><span>Expenses</span></button>
+    <button type="button" data-tab="settings" aria-controls="tab-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>Settings</span></button>
   </nav>
 </header>
-
-<main>
-  <section id="tab-week" class="tab">
-    <div class="toolbar">
-      <button id="btn-prev" title="Previous week">‹</button>
-      <label>Week of Monday <input type="date" id="week-monday"></label>
-      <button id="btn-next" title="Next week">›</button>
+<main id="main-content" tabindex="-1" hidden inert>
+  <h1 id="page-title" class="visually-hidden">Timesheets</h1>
+  <p id="offline-status" class="pill norec" role="status" hidden>Offline · changes stay on this device until sync</p>
+  <section id="tab-week" class="tab" aria-label="Timesheets">
+    <div class="toolbar week-toolbar">
+      <div class="week-picker"><button id="btn-prev" title="Previous week" aria-label="Previous week">‹</button><label>Week starting <input type="date" id="week-monday"></label><button id="btn-next" title="Next week" aria-label="Next week">›</button></div>
+      <button id="btn-current" type="button">This week</button>
       <button id="btn-load" class="primary">Load from Clockify</button>
       <button id="btn-bulk" class="link" title="Several weeks in one IFS text">Bulk copy…</button>
-      <span id="week-status" class="muted"></span>
+      <span id="week-status" class="muted" role="status" aria-live="polite"></span>
     </div>
     <div id="week-result"></div>
   </section>
-
-  <section id="tab-expenses" class="tab" hidden></section>
-
-  <section id="tab-overview" class="tab" hidden></section>
-
-  <section id="tab-settings" class="tab" hidden></section>
+  <section id="tab-expenses" class="tab" aria-label="Expenses" hidden></section>
+  <section id="tab-overview" class="tab" aria-label="Overview" hidden></section>
+  <section id="tab-settings" class="tab" aria-label="Settings" hidden></section>
 </main>
-
+<noscript><p class="empty">Enable JavaScript to use IFS Bridge.</p></noscript>
 <script type="module" src="./js/app.js"></script>
 </body>
 </html>
+

@@ -1,0 +1,91 @@
+/* Personal spending keeps its monthly analysis independent of Work's sheet layout. */
+body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #tab-expenses{max-width:1120px;margin-inline:auto}
+.personal-page{min-width:0}
+.personal-toolbar{margin:0 0 14px}
+.personal-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.personal-month{display:flex;align-items:center;gap:4px}
+.personal-month input{width:180px;font-weight:600}
+.personal-month button{padding:4px 10px;font-size:21px;min-width:34px}
+.personal-toolbar-main>select{width:auto;min-width:78px}
+.personal-toolbar-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+.personal-status{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink-3);margin-top:8px;align-items:center}
+.personal-status button{font-size:12px}
+.personal-metrics{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:12px}
+.personal-metric{text-align:left;display:flex;flex-direction:column;gap:3px;padding:16px 18px;border-radius:12px;min-width:0}
+.personal-metric-label{font-size:13px;color:var(--ink-2)}
+.personal-metric strong{font-family:"IBM Plex Mono",monospace;font-size:clamp(18px,2.1vw,27px);font-weight:500;letter-spacing:-.045em;overflow-wrap:anywhere}
+.personal-metric small{font-size:12px}
+.personal-metric.primary-metric{background:var(--accent-soft);border-color:var(--accent)}
+.personal-other-currencies{display:flex;gap:12px;flex-wrap:wrap;margin:3px 0}
+.personal-other-currencies:empty{display:none}
+.personal-other-currencies button{font-size:12px}
+.personal-comparison{display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;padding:12px 2px;font-size:13px}
+.personal-comparison small{font-size:12px;color:var(--ink-3)}
+.personal-panel{padding:18px;background:var(--surface);border:1px solid var(--rule);border-radius:12px;margin:0 0 14px;min-width:0}
+.personal-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.personal-panel-head h3{font-size:16px;margin:0}
+.personal-panel-head button{font-size:12px}
+.personal-panel>small{font-size:12px}
+.personal-breakdowns{display:grid;grid-template-columns:1fr 1fr;gap:14px;min-width:0}
+.personal-group-list{margin-top:8px}
+.personal-group{display:block;width:100%;text-align:left;border:0;border-radius:6px;background:transparent;padding:9px 5px}
+.personal-group:hover{background:var(--surface-2)}
+.personal-group-line{display:flex;gap:10px;align-items:baseline;justify-content:space-between;font-size:13px}
+.personal-group-line strong{overflow-wrap:anywhere}
+.personal-group-line b{font-size:12px;font-weight:500}
+.personal-group-track{display:block;height:5px;background:var(--surface-2);border-radius:3px;margin:5px 0}
+.personal-group-track i{display:block;background:var(--accent);border-radius:3px;height:100%}
+.personal-group small{font-size:11px}
+.personal-legend{display:flex;gap:12px;font-size:11px;color:var(--ink-3)}
+.personal-legend span::before{content:"";display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;background:var(--accent)}
+.personal-legend .legend-refunds::before{background:var(--amber)}
+.personal-chart-scroll{overflow-x:auto;max-width:100%;margin-bottom:6px}
+.personal-daily-chart{display:flex;height:172px;gap:3px;min-width:660px;align-items:stretch;padding-top:8px}
+.personal-day{flex:1;min-width:18px;border:0;border-radius:3px;background:transparent;padding:0;display:flex;flex-direction:column;justify-content:flex-end;gap:5px}
+.personal-day:hover,.personal-day:focus-visible{background:var(--surface-2)}
+.personal-day-bars{height:142px;display:flex;align-items:flex-end;justify-content:center;gap:2px;width:100%;border-bottom:1px solid var(--rule)}
+.personal-day-bars>span{display:block;min-width:4px;width:38%;background:var(--accent);border-radius:2px 2px 0 0}
+.personal-day-bars>.refund-bar{background:var(--amber)}
+.personal-day-label{font-size:10px;color:var(--ink-3);text-align:center}
+.personal-day.future{opacity:.45}
+.personal-entry{display:grid;grid-template-columns:55px minmax(0,1fr) auto 12px;align-items:center;gap:12px;width:100%;border:0;border-bottom:1px solid var(--rule);border-radius:0;background:transparent;text-align:left;padding:12px 3px}
+.personal-entry:last-child{border-bottom:0}
+.personal-entry:hover{background:var(--surface-2)}
+.personal-entry-date{font-size:12px;color:var(--ink-3)}
+.personal-entry-description{display:flex;flex-direction:column;min-width:0}
+.personal-entry-description strong{font-size:14px;overflow-wrap:anywhere}
+.personal-entry-description small{font-size:12px}
+.personal-entry-note{font-size:12px;color:var(--ink-3);overflow-wrap:anywhere;white-space:pre-line}
+.personal-entry>.amt{font-size:13px;font-weight:500}
+.personal-edit-hint{font-size:18px;color:var(--ink-3)}
+.personal-refund{color:var(--ok)}
+.personal-filters{display:grid;grid-template-columns:minmax(180px,2fr) repeat(3,minmax(120px,1fr));gap:8px}
+.personal-filters>*{font-size:13px;min-width:0}
+.personal-filter-state{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:12px 0 4px;color:var(--ink-3);font-size:12px}
+.personal-filter-state button{font-size:12px}
+.personal-filter-chip{padding:2px 8px;min-height:28px;background:var(--accent-soft)}
+.personal-pagination{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px;font-size:12px}
+.personal-empty{text-align:center;padding:26px 15px}
+.personal-empty p{color:var(--ink-3);max-width:550px;margin:8px auto 18px}
+.personal-empty .actions{justify-content:center}
+.personal-footnote{font-size:12px;color:var(--ink-3);margin:8px 0 0}
+.personal-warning{padding:8px 12px;border-radius:8px;background:var(--amber-soft);color:var(--amber);margin-bottom:12px;font-size:13px}
+.personal-warning p{margin:3px 0}
+@media(max-width:760px){
+  .personal-toolbar-actions{margin-left:0}.personal-toolbar-main{gap:6px}.personal-month{flex:1}.personal-month input{width:150px;flex:1;min-width:0}.personal-toolbar-main>.personal-this-month{display:none}
+  .personal-toolbar-main>select{margin-left:auto}.personal-toolbar-actions{flex-basis:100%}.personal-toolbar-actions>.primary{flex:1}
+  .personal-metrics{grid-template-columns:1fr 1fr;gap:8px}.personal-metric.primary-metric{grid-column:1/-1}.personal-metric{padding:12px 14px}.personal-metric strong{font-size:21px}.personal-metric.primary-metric strong{font-size:29px}
+  .personal-breakdowns{grid-template-columns:1fr;gap:0}.personal-panel{padding:13px}.personal-comparison{padding:11px 1px}.personal-comparison small{flex-basis:100%}
+  .personal-entry{grid-template-columns:42px minmax(0,1fr) auto;gap:8px}.personal-entry>.amt{font-size:12px}.personal-edit-hint{display:none}.personal-entry-date{font-size:11px}
+  .personal-filters{grid-template-columns:1fr 1fr}.personal-filters input[type=search]{grid-column:1/-1}.personal-filters select:last-child{grid-column:1/-1}.personal-panel-head button{max-width:100%}
+}
+/* Keep an amount intact; large values may scroll inside their own card. */
+.personal-metric strong{white-space:nowrap;overflow-x:auto;max-width:100%;overflow-wrap:normal}
+@media(max-width:760px){.personal-metric strong{font-size:clamp(15px,4.3vw,21px)}.personal-metric.primary-metric strong{font-size:29px}}
+/* Keep the monthly modes compact, with room to wrap on a phone. */
+.personal-views { display:flex; flex-wrap:wrap; gap:4px; margin:8px 0; }
+.personal-views button { padding:6px 12px; }
+.personal-views button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
+
+.personal-toolbar-actions{flex-wrap:wrap}.personal-toolbar-actions>button{white-space:nowrap;flex-shrink:0}
+@media(max-width:760px){.personal-toolbar-actions>.primary{flex:0 0 auto}}

@@ -33,22 +33,34 @@ export function openDialog(title, body, { onClose, wide = false } = {}) {
   const closeBtn = el('button', { type: 'button', class: 'dialog-close', 'aria-label': 'Close', onclick: () => d.close() }, '×');
   const d = el('dialog', { class: 'dlg' + (wide ? ' wide' : '') },
     el('div', { class: 'dlg-body' }, el('div', { class: 'dlg-head' }, el('h3', {}, title), closeBtn), body));
-  d.addEventListener('click', e => { if (e.target === d) d.close(); });
+  d.setAttribute('aria-label', title);
+  // Only a real backdrop tap closes the dialog, not a tap on its inner padding.
+  d.addEventListener('click', e => {
+    if (e.target !== d) return;
+    const box = d.getBoundingClientRect();
+    if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) d.close();
+  });
   d.addEventListener('close', () => { d.remove(); onClose && onClose(); });
+  // A late callback must not create an invisible modal over the sign-in form.
+  if (document.documentElement.dataset.auth === 'locked') {
+    d.replaceChildren(); onClose?.(); return d;
+  }
   document.body.append(d);
   d.showModal();
   return d;
 }
 
 export function toast(text, ms = 2500) {
+  if (document.documentElement.dataset.auth === 'locked') return;
   let host = $('#toast-host');
-  if (!host) { host = el('div', { id: 'toast-host' }); document.body.append(host); }
+  if (!host) { host = el('div', { id: 'toast-host', role: 'status', 'aria-live': 'polite' }); document.body.append(host); }
   const t = el('div', { class: 'toast' }, text);
   host.append(t);
   setTimeout(() => t.remove(), ms);
 }
 
 export function download(filename, text, type = 'text/plain') {
+  if (document.documentElement.dataset.auth === 'locked') return;
   const blob = new Blob([text], { type });
   const a = el('a', { href: URL.createObjectURL(blob), download: filename });
   document.body.append(a); a.click(); a.remove();

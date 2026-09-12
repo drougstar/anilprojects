@@ -1,20 +1,46 @@
+import { currentScope, scopedKey, scopeIsCurrent, assertScopeCurrent } from './scope.js';
+import { initWorkspaceUI, accountPanel, initAuthGate, revealPrivateApp } from './workspace-ui.js';
 import { Clockify } from './clockify.js';
 import { buildWeek, mondayOf, fetchWindow, DAYS, localToUtc, utcToLocalInput } from './rules.js';
 import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber, activityFromRecord, identityFromRecord } from './ifs.js';
-import { loadSettings, saveSettings, DEFAULTS } from './store.js';
-import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson } from './expenses.js';
+import { loadSettings, saveSettings, DEFAULTS, defaultsForScope } from './store.js';
+import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, showExpenseAttention } from './expenses.js';
 import { el, $, confirmButton, toast, openDialog, field as dlgField } from './dom.js';
 import { initLocalBackup, backupAvailable, backupMeta, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
 import { allWeeks, weekRecord, markWeekEntered, unmarkWeek, diffRows, recentMondays, shiftIso } from './week-status.js';
 import { initReport, render as renderOverview } from './report.js';
+import { initPersonal, renderPersonal } from './personal.js';
+import { initShell, updateShell } from './shell.js';
 
-let settings = loadSettings();
+let settings = scopeIsCurrent() ? loadSettings() : null;
 let week = null;          // result of buildWeek
 let exportText = '';
+let weekLoadId = 0;       // Only the newest request may update the selected week.
 let clockifyProjects = null;
 let weekEntries = [];      // raw Clockify entries of the loaded week (for the editor)
 let clockifyMeta = null;   // { projects, tags } for the entry dialog
+let clockifyConnectId = 0;
+
+function invalidateClockifyView() {
+  // An in-flight request or cached editor must not bring the previous account back.
+  ++weekLoadId;
+  week = null; weekEntries = []; exportText = '';
+  clockifyProjects = null; clockifyMeta = null;
+  $('#week-result')?.replaceChildren();
+  $('#week-result')?.removeAttribute('aria-busy');
+  if ($('#week-status')) $('#week-status').textContent = '';
+  if ($('#btn-load')) $('#btn-load').disabled = false;
+}
+
+function changeClockifyKey(value) {
+  const next = value.trim();
+  if (next === settings.clockify.apiKey) return false;
+  ++clockifyConnectId;
+  settings.clockify = { ...settings.clockify, apiKey: next, userId: '', workspaceId: '', userName: '' };
+  invalidateClockifyView();
+  return true;
+}
 
 // Theme: 'auto' follows the system, 'light' / 'dark' force one.
 export function applyTheme(mode) {
@@ -27,13 +53,29 @@ const fmtH = h => (h === 0 ? '' : (Math.round(h * 100) / 100).toString());
 
 // ---------- tabs ----------
 function showTab(name) {
+  // Ignore a stale saved tab name instead of hiding every screen.
+  if (!['week', 'expenses', 'overview', 'settings'].includes(name)) name = 'week';
+  const personal = currentScope().workspace === 'personal';
+  if (personal && name === 'week') name = 'overview';
+  if (!scopeIsCurrent()) return;
+  const previous = document.querySelector('.tabs button.active')?.dataset.tab;
+  if (previous && previous !== name) window.scrollTo({ top: 0, behavior: 'instant' });
+  updateShell(name);
   for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('active', b.dataset.tab === name);
   for (const s of document.querySelectorAll('.tab')) s.hidden = s.id !== `tab-${name}`;
-  try { localStorage.setItem('ifsbridge.tab', name); } catch {}
+  try { localStorage.setItem(scopedKey('ifsbridge.tab'), name); } catch {}
   if (name === 'settings') renderSettings();
-  if (name === 'expenses') { renderExpenses(); scheduleSync(500); }
-  if (name === 'overview') renderOverview();
+  if (name === 'expenses') { personal ? renderPersonal($('#tab-expenses'), 'transactions') : renderExpenses(); scheduleSync(500); }
+  if (name === 'overview') { personal ? renderPersonal($('#tab-overview'), 'overview') : renderOverview(); if (personal) scheduleSync(500); }
   if (name === 'week' && !week && settings.clockify.apiKey) loadWeek();   // no need to press Load the first time
+  if (name === 'week' && !settings.clockify.apiKey) {
+    $('#week-result').replaceChildren(el('div', { class: 'empty expense-empty' },
+      el('h3', {}, 'Bring your week into focus'),
+      el('p', {}, 'Connect Clockify to review your hours, check the IFS activity mapping and prepare your weekly timesheet.'),
+      el('div', { class: 'actions', style: 'justify-content:center' },
+        el('button', { class: 'primary', onclick: () => showTab('settings') }, 'Connect Clockify'),
+        el('button', { onclick: () => showTab('expenses') }, 'Open expenses'))));
+  }
 }
 
 // ---------- week ----------
@@ -49,30 +91,60 @@ function shiftMonday(iso, days) {
 }
 
 async function loadWeek() {
+  assertScopeCurrent();
+  if (currentScope().workspace === 'personal') return;
+  const requestId = ++weekLoadId;
   const status = $('#week-status');
+  const host = $('#week-result');
   const monday = mondayOf($('#week-monday').value || todayIso());
   $('#week-monday').value = monday;
-  if (!settings.clockify.apiKey) { status.textContent = 'Add your Clockify API key in Settings first.'; showTab('settings'); return; }
-  status.textContent = 'Loading from Clockify…';
+  // A different date must never leave the previous week's copy/edit actions available.
+  week = null;
+  weekEntries = [];
+  exportText = '';
+  host.replaceChildren();
+  if (!settings.clockify.apiKey) {
+    $('#btn-load').disabled = false;
+    host.removeAttribute('aria-busy');
+    status.textContent = 'Add your Clockify API key in Settings first.';
+    showTab('settings');
+    return;
+  }
+  status.textContent = `Loading week of ${monday}…`;
+  host.setAttribute('aria-busy', 'true');
+  host.append(el('p', { class: 'empty', role: 'status' }, 'Loading hours from Clockify…'));
   $('#btn-load').disabled = true;
   try {
     const c = new Clockify(settings.clockify.apiKey);
     if (!settings.clockify.userId) {
       const u = await c.user();
+      if (!scopeIsCurrent() || requestId !== weekLoadId) return;
       settings.clockify.userId = u.id; settings.clockify.workspaceId = u.activeWorkspace; settings.clockify.userName = u.name;
       if (u.settings?.timeZone) settings.timeZone = u.settings.timeZone;
       saveSettings(settings);
     }
     const win = fetchWindow(monday, settings.timeZone);
     const entries = await c.entries(settings.clockify.workspaceId, settings.clockify.userId, win.start, win.end);
+    if (!scopeIsCurrent() || requestId !== weekLoadId) return;
     weekEntries = entries;
     week = buildWeek(entries, monday, settings, settings.mapping);
     exportText = week.canExport ? makeExport(week) : '';
     renderWeek();
     status.textContent = '';
   } catch (e) {
-    status.textContent = e.message;
-  } finally { $('#btn-load').disabled = false; renderWeekStrip(); }
+    if (!scopeIsCurrent() || requestId !== weekLoadId) return;
+    week = null; weekEntries = []; exportText = '';
+    status.textContent = `Week of ${monday} could not be loaded.`;
+    host.replaceChildren(el('div', { class: 'empty', role: 'alert' },
+      el('p', {}, e.message || 'Check your connection and try again.'),
+      el('button', { type: 'button', onclick: loadWeek }, 'Try again')));
+  } finally {
+    if (scopeIsCurrent() && requestId === weekLoadId) {
+      $('#btn-load').disabled = false;
+      host.removeAttribute('aria-busy');
+      renderWeekStrip();
+    }
+  }
 }
 
 function makeExport(w) {
@@ -117,6 +189,9 @@ function renderWeek() {
     el('td', { class: 'num total' }, fmtH(r.total))));
   const foot = el('tr', { class: 'totals' }, el('td', { colspan: 2 }, 'Day total'), w.dayTotals.map(h => el('td', { class: 'num' }, fmtH(h))), el('td', { class: 'num total' }, fmtH(w.weekTotal)));
   host.append(el('div', { class: 'tbl' }, el('table', {}, el('thead', {}, head), el('tbody', {}, body.length ? body : el('tr', {}, el('td', { colspan: 10, class: 'empty' }, 'No hours for this week.'))), el('tfoot', {}, foot))));
+  // The total already lives in the table. Keep the remaining details small and below the hours.
+  const workedDays = w.dayTotals.filter(h => h > 0).length;
+  host.append(el('p', { class: 'week-meta muted' }, `${workedDays} day${workedDays === 1 ? '' : 's'} with hours · ${w.rows.length} IFS row${w.rows.length === 1 ? '' : 's'}`));
 
   // one action row: copy, view, entered status
   const copyBtn = el('button', { class: 'primary', disabled: w.canExport ? null : 'disabled', onclick: copyExport }, 'Copy for IFS');
@@ -137,6 +212,7 @@ const fmtWhen = iso => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-dig
 
 async function renderWeekStatus(w, inline, changesBox) {
   const rec = await weekRecord(w.mondayIso);
+  if (week !== w || !inline.isConnected) return;
   inline.replaceChildren();
   changesBox.replaceChildren();
   if (!rec) {
@@ -145,7 +221,7 @@ async function renderWeekStatus(w, inline, changesBox) {
     return;
   }
   const changes = diffRows(rec.rows, w);
-  const undo = confirmButton('undo', async () => { await unmarkWeek(w.mondayIso); toast('Week is no longer marked as entered'); renderWeek(); renderWeekStrip(); scheduleSync(); }, { armedLabel: 'undo? tap again', className: 'link' });
+  const undo = confirmButton('undo', async () => { await unmarkWeek(w.mondayIso); toast('Week is no longer marked as entered'); if (week === w) renderWeek(); renderWeekStrip(); scheduleSync(); }, { armedLabel: 'undo? tap again', className: 'link' });
   inline.append(...[
     el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec'), title: `entered ${fmtWhen(rec.enteredAt)} with ${rec.total} h` }, changes.length ? 'Changed since entered' : `In IFS · ${fmtWhen(rec.enteredAt)}`),
     changes.length ? el('button', { onclick: () => markEntered(w) }, 'Mark again') : null,
@@ -156,7 +232,7 @@ async function renderWeekStatus(w, inline, changesBox) {
 async function markEntered(w) {
   await markWeekEntered(w);
   toast('Week marked as entered in IFS');
-  renderWeek();
+  if (week === w) renderWeek();
   renderWeekStrip();
   scheduleSync();
 }
@@ -188,23 +264,71 @@ function openBulkDialog() {
   const to = el('input', { type: 'date', value: shiftIso(thisMonday, -7) });
   const list = el('div');
   const status = el('span', { class: 'help status' });
-  let loaded = [];
+  let loaded = [], busy = false;
   const copyBtn = el('button', { class: 'primary', disabled: true, onclick: async () => {
+    if (busy) return;
     const ok = loaded.filter(x => x.w.canExport);
+    if (!ok.length) return;
     const text = ok.map(x => makeExport(x.w)).join('\n\n');
+    setBusy(true);
     try { await navigator.clipboard.writeText(text); toast(`Copied ${ok.length} week${ok.length === 1 ? '' : 's'}, ${ok.reduce((n, x) => n + x.w.rows.length, 0)} rows`); }
     catch { status.textContent = 'Clipboard blocked; open the weeks one by one instead.'; }
+    finally { setBusy(false); }
   } }, 'Copy all');
-  const markBtn = el('button', { disabled: true, onclick: async () => { let n = 0; for (const x of loaded) if (x.w.canExport) { await markWeekEntered(x.w); n++; } toast(`${n} week${n === 1 ? '' : 's'} marked as entered`); loadBtn.click(); renderWeekStrip(); scheduleSync(); } }, 'Mark all as entered');
+  const markBtn = el('button', { disabled: true, onclick: async () => {
+    if (busy || !loaded.some(x => x.w.canExport)) return;
+    setBusy(true);
+    let n = 0;
+    try {
+      for (const x of loaded) if (x.w.canExport) { x.rec = await markWeekEntered(x.w); n++; }
+      paintLoaded();
+      status.textContent = `${n} week${n === 1 ? '' : 's'} marked as entered.`;
+      toast(status.textContent);
+    } catch (e) {
+      paintLoaded();
+      status.textContent = `${n} week${n === 1 ? '' : 's'} marked; could not finish: ${e.message}`;
+    } finally {
+      setBusy(false);
+      renderWeekStrip();
+      if (n) scheduleSync();
+    }
+  } }, 'Mark all as entered');
   const loadBtn = el('button', { onclick: async () => {
+    if (busy) return;
+    invalidate();
+    if (!from.value || !to.value) { status.textContent = 'Pick both a from-week and a to-week.'; return; }
     const a = mondayOf(from.value), b = mondayOf(to.value);
-    if (!from.value || !to.value || a > b) { status.textContent = 'Pick a from-week that is not after the to-week.'; return; }
+    if (a > b) { status.textContent = 'Pick a from-week that is not after the to-week.'; return; }
     const mondays = []; for (let m = a; m <= b; m = shiftIso(m, 7)) mondays.push(m);
     if (mondays.length > 26) { status.textContent = 'Up to 26 weeks at a time.'; return; }
-    loadBtn.disabled = true; loaded = []; status.textContent = `Loading ${mondays.length} week${mondays.length === 1 ? '' : 's'}…`;
+    setBusy(true);
+    status.textContent = `Loading ${mondays.length} week${mondays.length === 1 ? '' : 's'}…`;
     try {
-      for (const m of mondays) loaded.push({ monday: m, w: await fetchWeek(m), rec: await weekRecord(m) });
-    } catch (e) { status.textContent = e.message; loadBtn.disabled = false; return; }
+      // Keep partial results private until the complete range is ready to review.
+      const next = [];
+      for (const m of mondays) next.push({ monday: m, w: await fetchWeek(m), rec: await weekRecord(m) });
+      loaded = next;
+      paintLoaded();
+      const ok = loaded.filter(x => x.w.canExport);
+      status.textContent = ok.length ? `${ok.length} week${ok.length === 1 ? '' : 's'} ready, ${loaded.length - ok.length} skipped.` : 'Nothing to export in this range.';
+    } catch (e) {
+      status.textContent = `Could not load the full range. ${e.message} Press Load weeks to try again.`;
+    } finally { setBusy(false); }
+  } }, 'Load weeks');
+
+  function setBusy(value) {
+    busy = value;
+    loadBtn.disabled = from.disabled = to.disabled = value;
+    copyBtn.disabled = markBtn.disabled = value || !loaded.some(x => x.w.canExport);
+    list.setAttribute('aria-busy', String(value));
+  }
+  function invalidate() {
+    loaded = [];
+    list.replaceChildren();
+    copyBtn.disabled = markBtn.disabled = true;
+    status.textContent = 'Load this range to review its weeks.';
+  }
+  function paintLoaded() {
     list.replaceChildren(el('div', { class: 'tbl' }, el('table', { class: 'bulk-table' },
       el('thead', {}, el('tr', {}, ['Week of', 'Hours', 'Rows', 'Problems', 'Status'].map(h => el('th', {}, h)))),
       el('tbody', {}, loaded.map(x => {
@@ -214,11 +338,9 @@ function openBulkDialog() {
           el('td', {}, errors.length ? el('span', { class: 'warn-text' }, errors.map(z => z.text).join(' ')) : x.w.rows.length ? '—' : el('span', { class: 'muted' }, 'no hours')),
           el('td', {}, x.rec ? el('span', { class: 'pill ' + (changes.length ? 'norec' : 'rec') }, changes.length ? 'changed since entered' : `entered ${fmtWhen(x.rec.enteredAt)}`) : el('span', { class: 'pill' }, 'not entered')));
       })))));
-    const ok = loaded.filter(x => x.w.canExport);
-    copyBtn.disabled = markBtn.disabled = !ok.length;
-    status.textContent = ok.length ? `${ok.length} week${ok.length === 1 ? '' : 's'} ready, ${loaded.length - ok.length} skipped.` : 'Nothing to export in this range.';
-    loadBtn.disabled = false;
-  } }, 'Load weeks');
+  }
+  from.addEventListener('change', invalidate);
+  to.addEventListener('change', invalidate);
   openDialog('Bulk copy weeks', el('div', { class: 'form' },
     el('p', { class: 'help' }, 'Loads every week in the range from Clockify, builds the IFS rows and puts them all in one text. Each row carries its own week date, so one Paste Object in Proje Zaman Kaydı creates all of them. Weeks with a problem (unmapped project) are skipped.'),
     el('div', { class: 'grid2' }, dlgField('From (week of)', from), dlgField('To (week of)', to)),
@@ -388,13 +510,24 @@ function renderSettings() {
   // Clockify
   const key = txt(s.clockify.apiKey, { type: 'password', autocomplete: 'off', spellcheck: 'false', id: 'set-key' });
   const testBtn = el('button', { onclick: async () => {
-    settings.clockify.apiKey = key.value.trim();
-    const st = $('#key-status'); st.textContent = 'Checking…';
-    try { const u = await new Clockify(settings.clockify.apiKey).user();
+    if (testBtn.disabled) return;
+    const enteredKey = key.value.trim(), st = $('#key-status');
+    if (!enteredKey) { st.textContent = 'Enter your Clockify API key first.'; return; }
+    assertScopeCurrent();
+    changeClockifyKey(enteredKey);
+    const request = ++clockifyConnectId;
+    testBtn.disabled = true; st.textContent = 'Checking…';
+    try {
+      const u = await new Clockify(enteredKey).user();
+      if (!scopeIsCurrent() || request !== clockifyConnectId || settings.clockify.apiKey !== enteredKey) return;
+      if (key.value.trim() !== enteredKey) { st.textContent = 'Key changed. Press Connect to check it.'; return; }
+      invalidateClockifyView();
       settings.clockify.userId = u.id; settings.clockify.workspaceId = u.activeWorkspace; settings.clockify.userName = u.name;
       if (u.settings?.timeZone) settings.timeZone = u.settings.timeZone;
-      saveSettings(settings); st.textContent = `Connected as ${u.name} (${settings.timeZone}).`; renderSettings(); }
-    catch (e) { st.textContent = e.message; }
+      saveSettings(settings); st.textContent = `Connected as ${u.name} (${settings.timeZone}).`; renderSettings();
+    } catch (e) {
+      if (scopeIsCurrent() && request === clockifyConnectId) st.textContent = e.message;
+    } finally { testBtn.disabled = false; }
   } }, 'Connect');
   root.append(el('section', {}, el('h3', {}, 'Clockify'),
     field('API key', key, 'Clockify → Profile settings → API. Stored only in this browser.'),
@@ -496,41 +629,8 @@ function renderSettings() {
     importArea, el('div', { class: 'row' }, importSel, importBtn, el('span', { id: 'import-status', class: 'muted' })),
     el('details', {}, el('summary', {}, 'Row template used for export'), templateArea)));
 
-  // Supabase sync
-  const sb = s.supabase;
-  const sbUrl = txt(sb.url, { placeholder: 'https://xxxx.supabase.co', spellcheck: 'false', oninput: e => { sb.url = e.target.value.trim(); } });
-  const sbKey = txt(sb.anonKey, { type: 'password', autocomplete: 'off', placeholder: 'anon public key', oninput: e => { sb.anonKey = e.target.value.trim(); } });
-  const email = txt('', { type: 'email', placeholder: 'you@example.com', autocomplete: 'username' });
-  const pw = txt('', { type: 'password', placeholder: 'password', autocomplete: 'current-password' });
-  const sbStatus = el('span', { id: 'sb-status', class: 'muted' });
-  const refreshSb = () => { const c = supabaseClient(); sbStatus.textContent = !c.configured ? 'Enter the project URL and anon key, then Save.' : c.signedIn ? `Signed in as ${c.email}.` : 'Not signed in.'; };
-  // After sign-in: check the tables exist, then push and pull everything once.
-  const runSync = async () => {
-    const c = supabaseClient();
-    const check = await checkSetup(c);
-    if (!check.startsWith('ok')) { sbStatus.textContent = check; return; }
-    const hint = check === 'ok' ? '' : ' ' + check.slice(3).trim();
-    sbStatus.textContent = 'Syncing…';
-    const r = await sync(c, t => { if (t) sbStatus.textContent = t; });
-    const problems = (r.errors || []).filter(e => !/is missing in Supabase/.test(e));
-    sbStatus.textContent = problems.length ? `Sync problem: ${problems[0]}` : `Synced as ${c.email}: ${r.pushed} sent, ${r.pulled} received${r.receipts ? `, ${r.receipts} photo${r.receipts === 1 ? '' : 's'} uploaded` : ''}.${hint}`;
-    if (r.pulled) renderExpenses();
-  };
-  const signIn = el('button', { class: 'primary', onclick: async () => { saveSettings(settings); try { await supabaseClient().signIn(email.value.trim(), pw.value); refreshSb(); await runSync(); } catch (e) { sbStatus.textContent = e.message; } } }, 'Sign in');
-  const signUp = el('button', { onclick: async () => { saveSettings(settings); try { const r = await supabaseClient().signUp(email.value.trim(), pw.value); sbStatus.textContent = r === 'confirm-email' ? 'Account created. Open the confirmation e-mail Supabase sent you, then sign in here.' : 'Account created and signed in.'; if (r !== 'confirm-email') await runSync(); } catch (e) { sbStatus.textContent = e.message; } } }, 'Create account');
-  const syncNow = el('button', { onclick: runSync }, 'Sync now');
-  const signOut = el('button', { class: 'link', onclick: () => { supabaseClient().signOut(); refreshSb(); } }, 'Sign out');
-  root.append(el('section', {}, el('h3', {}, 'Sync between phone and PC (Supabase)'),
-    el('ol', { class: 'muted setup-steps' },
-      el('li', {}, 'Create a free project at supabase.com (any name, region Europe).'),
-      el('li', {}, 'In the project open SQL Editor, paste the contents of supabase/schema.sql from the project folder, press Run.'),
-      el('li', {}, 'Project Settings → API: copy the Project URL and the anon public key into the fields below, then Save settings.'),
-      el('li', {}, 'Create your account with an e-mail and password, confirm the e-mail, sign in. The first sign-in sends everything on this device to the cloud.'),
-      el('li', {}, 'Run supabase/deploy_app.py once to publish the app to the project; open the printed address on the phone, add it to the home screen and sign in there with the same account.')),
-    el('div', { class: 'grid2' }, field('Project URL', sbUrl, 'Looks like https://abcdefgh.supabase.co'), field('Anon key', sbKey, 'The long “anon public” key. It is safe on a phone; the service_role key is never entered here.')),
-    el('div', { class: 'grid2' }, field('E-mail', email), field('Password', pw)),
-    el('div', { class: 'row' }, signIn, signUp, syncNow, signOut, sbStatus)));
-  setTimeout(refreshSb, 0);
+  // Account changes reload before any records from the new account can sync.
+  root.append(el('section', {}, el('h3', {}, 'Account and sync'), accountPanel()));
 
   // Expense defaults
   const defCur = el('select', { onchange: e => { s.defaultCurrency = e.target.value; } }, s.currencies.map(c => el('option', { value: c, selected: c === s.defaultCurrency ? 'selected' : null }, c)));
@@ -551,7 +651,7 @@ function renderSettings() {
     el('div', { class: 'grid2' }, field('Default currency', defCur), field('Cost objects (comma separated)', costList, 'The "Person" column of the workbook: /Personal 1, /16 QP 16 …')),
     el('div', { class: 'grid3' },
       field('Home currency', el('select', { onchange: e => { s.homeCurrency = e.target.value; } }, s.currencies.map(c => el('option', { value: c, selected: c === (s.homeCurrency || 'TRY') ? 'selected' : null }, c))), 'Lines in this currency are exported with currency rate 1.'),
-      field('Rate for other currencies', el('select', { onchange: e => { s.rateSource = e.target.value; } }, [['tcmb', 'Central Bank (TCMB) rate for each line’s date, via the PC server'], ['manual', 'Rate typed per sheet under Sheets…']].map(([v, l]) => el('option', { value: v, selected: v === (s.rateSource || 'tcmb') ? 'selected' : null }, l))), 'IFS does not look rates up on pasted rows, so the export carries one per line. TCMB is what Turkish IFS rate tables are normally loaded from.'),
+      field('Rate for other currencies', el('select', { onchange: e => { s.rateSource = e.target.value; } }, [['tcmb', 'Central Bank (TCMB) rate for each line’s date'], ['manual', 'Rate typed per sheet under Sheets…']].map(([v, l]) => el('option', { value: v, selected: v === (s.rateSource || 'tcmb') ? 'selected' : null }, l))), 'Uses the PC rate service when available, then the daily rate files. Check that the selected rate column matches the rate required for your IFS sheet.'),
       field('TCMB column IFS uses', el('select', { onchange: e => { s.tcmbField = e.target.value; } }, [['ForexBuying', 'Döviz alış (forex buying)'], ['ForexSelling', 'Döviz satış (forex selling)'], ['BanknoteBuying', 'Efektif alış (banknote buying)'], ['BanknoteSelling', 'Efektif satış (banknote selling)']].map(([v, l]) => el('option', { value: v, selected: v === (s.tcmbField || 'ForexBuying') ? 'selected' : null }, l))), 'Check once against a line IFS has already rated and pick the column that matches.')),
     el('div', { class: 'grid2' },
       field('When no rate is known', el('select', { onchange: e => { s.currRateMode = e.target.value; } }, [['blank', 'Send the field empty'], ['omit', 'Leave the field out of the pasted row'], ['one', 'Always 1 (old workbook behaviour)']].map(([v, l]) => el('option', { value: v, selected: v === (s.currRateMode || 'blank') ? 'selected' : null }, l))), 'Only matters for lines whose rate could not be fetched or typed.'),
@@ -583,25 +683,37 @@ function renderSettings() {
       field('Time zone', txt(s.timeZone, { oninput: e => { s.timeZone = e.target.value.trim(); } })))));
 
   const saveBtn = el('button', { class: 'primary', onclick: () => {
-    settings.clockify.apiKey = key.value.trim();
+    changeClockifyKey(key.value.trim());
     settings.regularHours = Number(reg.value) || 9; settings.travelAfterHours = Number(trAfter.value) || settings.regularHours;
     settings.roundStep = Number(step.value) || 0.5; settings.roundMode = mode.value; settings.topUpMinimum = topUp.checked;
     settings.holidays = hol.value.split(/[\s,;]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
     settings.tags = { x15: t15.value.trim(), x2: t2.value.trim(), travel: tTr.value.trim(), travelOT: tTrOT.value.trim() }; settings.travelKeyword = kw.value.trim();
     settings.codes = { regular: cReg.value.trim(), ot15: c15.value.trim(), ot2: c2.value.trim(), travel: cTr.value.trim(), travelRegular: cTrR.value.trim() };
     settings.codeDescriptions = { ...settings.codeDescriptions, [settings.codes.regular]: dReg.value, [settings.codes.ot15]: d15.value, [settings.codes.ot2]: d2.value, [settings.codes.travel]: dTr.value, [settings.codes.travelRegular]: dTrR.value };
-    saveSettings(settings); $('#save-status').textContent = 'Saved.'; setTimeout(() => { $('#save-status').textContent = ''; }, 2000);
+    assertScopeCurrent(); saveSettings(settings); saveStatus.textContent = 'Saved.';
   } }, 'Save settings');
-  const resetBtn = confirmButton('Reset rules and mapping to defaults', () => { const keep = { clockify: settings.clockify, supabase: settings.supabase }; settings = { ...structuredClone(DEFAULTS), ...keep }; saveSettings(settings); renderSettings(); toast('Defaults restored. Keys kept.'); }, { armedLabel: 'Reset? Tap again to confirm', className: 'link' });
-  root.append(el('div', { class: 'actions' }, saveBtn, resetBtn, el('span', { id: 'save-status', class: 'muted' })));
+  const resetBtn = confirmButton(currentScope().workspace === 'personal' ? 'Reset spending preferences' : 'Reset rules and mapping to defaults', () => { const keep = { clockify: settings.clockify, supabase: settings.supabase }; settings = { ...defaultsForScope(), ...keep }; saveSettings(settings); renderSettings(); toast('Defaults restored. Keys kept.'); }, { armedLabel: 'Reset? Tap again to confirm', className: 'link' });
+  const saveStatus = el('span', { id: 'save-status', class: 'muted', role: 'status', 'aria-live': 'polite' });
+  root.append(el('div', { class: 'settings-reset' }, resetBtn));
+  // Personal exposes spending preferences; work-only connections and IFS fields stay in Work.
+  if (currentScope().workspace === 'personal') {
+    for (const section of [...root.querySelectorAll('section')]) {
+      const title = section.querySelector('h3')?.textContent;
+      if (['Pay estimate', 'Clockify', 'Rules', 'Clockify project → IFS activity', 'IFS identity'].includes(title)) section.remove();
+      if (title === 'Expenses') {
+        const nodes = [...section.children], index = nodes.findIndex(n => n.tagName === 'H4' && n.textContent === 'Backup and export');
+        section.replaceChildren(el('h3', {}, 'Spending preferences'), field('Default currency', defCur), ...(index < 0 ? [] : nodes.slice(index)));
+      }
+    }
+  }
   // Fold every section; the ones that still need attention start open, the rest remember your choice.
   const c = supabaseClient();
-  const needs = { Clockify: !settings.clockify.apiKey, 'Sync between phone and PC (Supabase)': !c.configured || !c.signedIn };
-  const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Sync between phone and PC (Supabase)': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
+  const needs = { Clockify: !settings.clockify.apiKey };
+  const stateOf = { Clockify: settings.clockify.userName ? `connected as ${settings.clockify.userName}` : 'not connected', 'Account and sync': !c.configured ? 'not set up' : c.signedIn ? `signed in as ${c.email}` : 'not signed in', Appearance: currentTheme() === 'auto' ? 'follows the system' : currentTheme(), 'Pay estimate': settings.payRate ? `${settings.payRate} ${settings.payCurrency || 'TRY'} per hour` : 'no rate yet' };
   for (const sec of root.querySelectorAll('section')) {
     const h3 = sec.querySelector('h3'); if (!h3) continue;
     const title = h3.textContent;
-    const key = 'ifsbridge.settings.open.' + title.replace(/\W+/g, '_').slice(0, 30);
+    const key = scopedKey('ifsbridge.settings.open.' + title.replace(/\W+/g, '_').slice(0, 30));
     let saved = null; try { saved = localStorage.getItem(key); } catch {}
     const open = saved ? saved === 'open' : !!needs[title];
     const det = el('details', { class: 'set-fold', open }, el('summary', {}, el('span', {}, title), stateOf[title] ? el('small', {}, stateOf[title]) : null));
@@ -610,6 +722,11 @@ function renderSettings() {
     sec.append(det);
     det.addEventListener('toggle', () => { try { localStorage.setItem(key, det.open ? 'open' : 'closed'); } catch {} });
   }
+  // Give Save its own space below the scrolling fields, so it never covers a fold.
+  const fields = el('div', { class: 'settings-fields', role: 'region', 'aria-label': 'Settings fields', tabindex: '0' });
+  while (root.firstChild) fields.append(root.firstChild);
+  for (const event of ['input', 'change']) fields.addEventListener(event, () => { saveStatus.textContent = 'Unsaved changes'; });
+  root.append(fields, el('div', { class: 'actions settings-save' }, saveBtn, saveStatus));
   if (backupAvailable()) backupMeta().then(m => { const e = $('#pc-backup-state'); if (e) e.textContent = m?.savedAt ? `Last PC backup ${new Date(m.savedAt).toLocaleString()} (${Math.max(1, Math.round(m.bytes / 1024))} KB) in ${m.path}` : 'No PC backup yet.'; });
 }
 
@@ -618,23 +735,48 @@ function rebuildTemplate(rec) {
 }
 
 // ---------- boot ----------
-function boot() {
-  initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), el, $ });
+async function boot() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settings = null; } });
+  if (!admitted) return;
+  settings = loadSettings();
+  const navigation = document.querySelector('.top');
+  navigation.inert = true;
+  const main = document.querySelector('#main-content');
+  main.inert = true;
+  try {
+  initShell();
+  initWorkspaceUI({
+    settings: () => settings,
+    sync: () => scheduleSync(0),
+    refresh: () => showTab(document.querySelector('.tabs button.active')?.dataset.tab || 'overview'),
+    openExpenses: kind => { showTab('expenses'); showExpenseAttention(kind); },
+    reviewWeek: monday => { $('#week-monday').value = monday; week = null; showTab('week'); }
+  });
+  const personal = currentScope().workspace === 'personal';
+  document.querySelector('.tabs button[data-tab="week"]').hidden = personal;
+  initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), scope: currentScope, el, $ });
   initReport({ settings: () => settings, saveSettings: s => saveSettings(s) });
+  initPersonal({ settings: () => settings, navigateTransactions: () => showTab('expenses') });
   $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
   $('#btn-bulk').addEventListener('click', openBulkDialog);
-  if (settings.clockify.apiKey) renderWeekStrip();
-  initLocalBackup({ onRestored: () => { settings = loadSettings(); const t = document.querySelector('.tabs button.active')?.dataset.tab || 'expenses'; showTab(t); } });
+  if (!personal && settings.clockify.apiKey) renderWeekStrip();
+  await initLocalBackup({ onRestored: () => { settings = loadSettings(); } });
+  assertScopeCurrent();
   for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
   $('#week-monday').value = mondayOf(shiftMonday(todayIso(), -7));
   $('#btn-load').addEventListener('click', loadWeek);
+  $('#btn-current').addEventListener('click', () => { $('#week-monday').value = mondayOf(todayIso()); loadWeek(); });
   $('#btn-prev').addEventListener('click', () => { $('#week-monday').value = shiftMonday(mondayOf($('#week-monday').value), -7); loadWeek(); });
   $('#btn-next').addEventListener('click', () => { $('#week-monday').value = shiftMonday(mondayOf($('#week-monday').value), 7); loadWeek(); });
-  $('#week-monday').addEventListener('change', () => { $('#week-monday').value = mondayOf($('#week-monday').value); });
-  let tab = 'week';
-  try { tab = localStorage.getItem('ifsbridge.tab') || 'week'; } catch {}
-  if (!settings.clockify.apiKey) tab = 'settings';
+  $('#week-monday').addEventListener('change', loadWeek);
+  let tab = personal ? 'overview' : 'week';
+  try { tab = localStorage.getItem(scopedKey('ifsbridge.tab')) || tab; } catch {}
   showTab(tab);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  } catch (error) {
+    if (!scopeIsCurrent()) return;
+    $('#main-content').replaceChildren(el('div', { class: 'empty' }, el('h3', {}, 'Could not open this space'), el('p', {}, error.message), el('button', { onclick: () => location.reload() }, 'Reload')));
+  } finally { if (scopeIsCurrent()) revealPrivateApp(); }
 }
 boot();
+

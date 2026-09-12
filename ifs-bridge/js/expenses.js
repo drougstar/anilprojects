@@ -1,7 +1,7 @@
 // Expenses tab: the list is the main view; adding, editing, sheets and trips open in dialogs.
 // Local-first (IndexedDB), backed up to the PC by localbackup.js, synced to Supabase when signed in.
 // No alert/confirm pop-ups (the Claude browser pane hides them).
-import { db, save, softDelete, live, uuid } from './db.js';
+import { db, save, softDelete, live, uuid, TABLES, atomicBatchSave } from './db.js';
 import { Supabase } from './supabase.js';
 import { sync, receiptBlob, receiptErrors } from './sync.js';
 import { buildExpenseExport, numberReceipts, referenceText, totalsByCurrency, fmtMoney, lineOrder, linesFromIfsRecords, rateKey, rateFor } from './expense-ifs.js';
@@ -9,26 +9,39 @@ import { parseCopyObjects } from './ifs.js';
 import { loadSettings, saveSettings } from './store.js';
 import { el, $, confirmButton, openDialog, toast, download, field } from './dom.js';
 import { readReceipt } from './ocr.js';
+import { currentScope, scopedKey, assertScopeCurrent, scopeIsCurrent } from './scope.js';
+import { initExpenseTools, openExpenseTools, openInbox } from './expense-tools.js';
+import { reimbursementSummary, validateExpenseChange, minorAmount } from './expense-workflows.js';
+import { snapshot, restoreSnapshot, assertBackupScope } from './localbackup.js';
 
 let ctx = null;            // { settings(), saveSettings(s) }
 let client = null;
 const state = { sheetId: null, filter: 'all', search: '', month: '', sort: 'order' };   // sort: order | bizFirst | persFirst
-try { state.sort = localStorage.getItem('ifsbridge.expSort') || 'order'; } catch {}
+try { state.sort = localStorage.getItem(scopedKey('ifsbridge.expSort')) || 'order'; } catch {}
 let data = { sheets: [], lines: [], trips: [] };
 let rateCache = { field: '', byKey: {} };   // "USD|2026-08-29" -> { rate, usedDate, source }
 const rateFailed = new Set();
+let ratePending = new Map();
 let syncTimer = null;
 let built = false;
+let personalChange = null;
 const LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
 
 // ---------- setup / sync ----------
 export function initExpenses(context) {
   ctx = context;
+  initExpenseTools({ settings, today: todayIso, currentSheet, refresh, scheduleSync, downscale, client: supabaseClient, newExpense: openNewExpense, openExpense });
   client = new Supabase(ctx.settings().supabase);
-  window.addEventListener('online', () => scheduleSync(0));
+  window.addEventListener('online', () => {
+    if (!scopeIsCurrent()) return;
+    scheduleSync(0);
+    resetRateFailures();
+    paint(['summary']);
+  });
 }
 
 export function supabaseClient() {
+  assertScopeCurrent();
   const s = ctx.settings().supabase;
   if (!client || client.url !== (s.url || '').replace(/\/+$/, '') || client.anonKey !== s.anonKey) client = new Supabase(s);
   return client;
@@ -36,20 +49,31 @@ export function supabaseClient() {
 
 export function scheduleSync(delay = 1500) {
   clearTimeout(syncTimer);
+  if (!ctx || !scopeIsCurrent()) return;
   syncTimer = setTimeout(async () => {
-    const c = supabaseClient();
+    syncTimer = null;
+    if (!scopeIsCurrent()) return;
     const st = $('#exp-sync');
-    if (!c.configured) { if (st) st.textContent = 'On this device only'; return; }
-    if (!c.signedIn) { if (st) st.textContent = 'Not signed in'; return; }
-    if (!navigator.onLine) { if (st) st.textContent = 'Offline, will sync later'; return; }
-    const r = await sync(c, t => { if (st && t) st.textContent = t; });
-    if (st) st.textContent = r.errors?.length ? `Sync problem: ${r.errors[0]}` : `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    if (r.pulled) refresh();
+    const status = text => { if (scopeIsCurrent() && st?.isConnected && text) st.textContent = text; };
+    try {
+      const c = supabaseClient();
+      if (!c.configured) { status('On this device only'); return; }
+      if (!c.signedIn) { status('Not signed in'); return; }
+      if (!navigator.onLine) { status('Offline, will sync later'); return; }
+      const r = await sync(c, status);
+      if (!scopeIsCurrent()) return;
+      status(r.errors?.length ? `Sync problem: ${r.errors[0]}` : `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+      if (r.pulled) await refresh();
+    } catch (error) {
+      // Sign-out cancels pending work; it must not repaint or reject a timer.
+      status(`Sync problem: ${error.message}`);
+    }
   }, delay);
 }
 
 // ---------- data ----------
 const settings = () => ctx.settings();
+const personalSpace = () => currentScope().workspace === 'personal';
 const todayIso = () => new Intl.DateTimeFormat('en-CA', { timeZone: settings().timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const shiftIso = (iso, days) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10); };
 const monthTitle = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
@@ -64,13 +88,30 @@ const homeCur = () => (settings().homeCurrency || 'TRY').toUpperCase();
 
 async function load() {
   data.sheets = (await live('sheets')).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-  if (!data.sheets.length) data.sheets = [await save('sheets', { title: monthTitle(todayIso()), expenseId: '', status: 'open', created_at: new Date().toISOString() })];
+  assertScopeCurrent();
+  if (!data.sheets.length) data.sheets = [await save('sheets', { title: monthTitle(todayIso()), expenseId: '', status: 'open', autoCreated: true, created_at: new Date().toISOString() })];
   data.lines = await live('expenses');
   data.trips = (await live('trips')).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
   if (!state.sheetId) state.sheetId = await db.meta('currentSheet');
   if (!data.sheets.some(s => s.id === state.sheetId)) state.sheetId = data.sheets[0].id;
   if (!rateCache.field) { const saved = await db.meta('rateCache'); if (saved && saved.byKey) rateCache = saved; }
-  if (rateCache.field && rateCache.field !== settings().tcmbField) rateCache = { field: settings().tcmbField, byKey: {} };
+  alignRateField();
+  assertScopeCurrent();
+}
+
+// The Personal dashboard uses the dialogs without mounting the Work sheet page.
+// Loading never invokes onChange, so a dashboard refresh can prepare safely.
+export async function preparePersonalExpenses({ onChange } = {}) {
+  assertScopeCurrent();
+  if (!personalSpace()) throw Error('Open the Personal space to prepare spending tools.');
+  if (onChange !== undefined) personalChange = onChange;
+  await load();
+  return currentSheet();
+}
+
+export async function openNewExpense(prefill = {}) {
+  await load(); assertScopeCurrent();
+  return openLineDialog(null, prefill);
 }
 
 async function setSheet(id) { state.sheetId = id; await db.setMeta('currentSheet', id); paintAll(); }
@@ -79,8 +120,29 @@ async function setSheet(id) { state.sheetId = id; await db.setMeta('currentSheet
 // them live; anywhere else the app reads the daily JSON files published with it
 // (rates/YYYY-MM-DD.json, updated every day by the site's GitHub Action).
 const dayFiles = new Map();
+const failedDays = new Set();
+function alignRateField() {
+  const field = settings().tcmbField || 'ForexBuying';
+  if (rateCache.field !== field) {
+    rateCache = { field, byKey: {} };
+    rateFailed.clear();
+    // Requests already running keep their old cache; they cannot replace this column.
+    ratePending = new Map();
+  }
+}
+function resetRateFailures() {
+  rateFailed.clear();
+  // Retry unavailable files too, including a file that was not published earlier.
+  for (const date of failedDays) dayFiles.delete(date);
+  failedDays.clear();
+}
 async function staticDay(date) {
-  if (!dayFiles.has(date)) dayFiles.set(date, fetch(`./rates/${date}.json`, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null));
+  if (!dayFiles.has(date)) dayFiles.set(date, fetch(`./rates/${date}.json`, { cache: 'no-cache' })
+    .then(r => r.ok ? r.json() : null).catch(() => null)
+    .then(day => {
+      if (!day || (!day.none && !day.rates)) { failedDays.add(date); return null; }
+      return day;
+    }));
   return dayFiles.get(date);
 }
 async function staticRate(cur, date, field) {
@@ -98,27 +160,56 @@ async function staticRate(cur, date, field) {
 async function ensureRates(lines) {
   const s = settings();
   if (s.rateSource === 'manual') return false;
-  const home = homeCur();
-  const wanted = [...new Set(lines.filter(l => l.business && (l.currency || '').toUpperCase() !== home && l.date).map(l => rateKey(l.currency, l.date)))]
+  alignRateField();
+  const cache = rateCache, pending = ratePending;
+  const wanted = foreignRateKeys(lines)
     .filter(k => !rateCache.byKey[k] && !rateFailed.has(k));
   if (!wanted.length) return false;
-  rateCache.field = s.tcmbField || 'ForexBuying';
-  let got = 0;
-  for (const k of wanted) {
+  const hits = await Promise.all(wanted.map(k => {
+    if (pending.has(k)) return pending.get(k);
     const [cur, date] = k.split('|');
-    try {
+    const request = (async () => {
       let hit = null;
       if (LOCAL) {
-        const r = await fetch(`/api/rate?cur=${encodeURIComponent(cur)}&date=${date}&field=${encodeURIComponent(rateCache.field)}`, { cache: 'no-store' });
-        const j = await r.json();
-        if (r.ok && Number(j.rate) > 0) hit = { rate: j.rate, usedDate: j.usedDate, source: j.source };
+        // A plain preview server has no API and may return an HTML error page.
+        // An unavailable local API must still allow the published JSON fallback.
+        try {
+          const r = await fetch(`/api/rate?cur=${encodeURIComponent(cur)}&date=${date}&field=${encodeURIComponent(cache.field)}`, { cache: 'no-store' });
+          if (r.ok) {
+            const j = await r.json();
+            if (Number(j?.rate) > 0) hit = { rate: j.rate, usedDate: j.usedDate, source: j.source };
+          }
+        } catch { /* Fall back to the daily files below. */ }
       }
-      if (!hit) hit = await staticRate(cur, date, rateCache.field);
-      if (hit) { rateCache.byKey[k] = hit; got++; } else rateFailed.add(k);
-    } catch { rateFailed.add(k); }
+      if (!hit) hit = await staticRate(cur, date, cache.field);
+      if (cache !== rateCache || cache.field !== (settings().tcmbField || 'ForexBuying')) return false;
+      if (hit) { cache.byKey[k] = hit; rateFailed.delete(k); return true; }
+      rateFailed.add(k);
+      return false;
+    })().catch(() => {
+      if (cache === rateCache && cache.field === (settings().tcmbField || 'ForexBuying')) rateFailed.add(k);
+      return false;
+    }).finally(() => pending.delete(k));
+    pending.set(k, request);
+    return request;
+  }));
+  const got = hits.some(Boolean) && cache === rateCache;
+  if (got) {
+    try { await db.setMeta('rateCache', cache); }
+    catch { /* Rates remain usable in this session if the device cache cannot save. */ }
   }
-  if (got) await db.setMeta('rateCache', rateCache);
-  return got > 0;
+  return got;
+}
+function foreignRateKeys(lines) {
+  const home = homeCur();
+  return [...new Set(lines.filter(l => l.business && l.currency && l.currency.toUpperCase() !== home && l.date).map(l => rateKey(l.currency, l.date)))];
+}
+async function retryRates() {
+  resetRateFailures();
+  const request = ensureRates(sheetLines());
+  paint(['summary']);
+  await request;
+  paint(['summary']);
 }
 
 // ---------- render ----------
@@ -140,39 +231,49 @@ export async function render() {
   paintAll();
 }
 
-async function refresh(parts = ['head', 'summary', 'list', 'trips']) { await load(); paint(parts); }
+async function refresh(parts = ['head', 'summary', 'list', 'trips'], change) {
+  await load();
+  if (personalSpace() && personalChange) await personalChange(change);
+  else paint(parts);
+}
 function paintAll() { paint(['help', 'head', 'summary', 'tools', 'list', 'trips']); }
 function paint(parts) {
   if (!built || !$('#exp-list')) return;   // Expenses tab not opened yet in this session: nothing to repaint
   for (const p of parts) ({ help: paintHelp, head: paintHead, summary: paintSummary, tools: paintTools, list: paintList, trips: paintTrips })[p]();
 }
 
-function paintHelp() {
+function paintHelp(forceOpen = false) {
   const host = $('#exp-help');
+  const open = forceOpen || !!host.querySelector('details')?.open;
   let dismissed = false;
-  try { dismissed = localStorage.getItem('ifsbridge.expHelp') === 'off'; } catch {}
+  try { dismissed = localStorage.getItem(scopedKey('ifsbridge.expHelp')) === 'off'; } catch {}
   host.replaceChildren();
   if (dismissed) return;
-  host.append(el('div', { class: 'help-box' },
-    el('b', {}, 'How expenses work here'),
+  if (personalSpace()) {
+    host.append(el('details', { class: 'help-box exp-help-fold', open }, el('summary', {}, 'How personal spending works'), el('p', {}, 'Record purchases and refunds, keep receipts, and review budgets. Use a negative amount for a refund. Tools includes receipt review, recurring drafts, CSV import and an optional Pocket link.')));
+    return;
+  }
+  host.append(el('details', { class: 'help-box exp-help-fold', open },
+    el('summary', {}, 'How expenses work here'),
     el('ol', {},
       el('li', {}, 'Add every expense as it happens, on the phone or the PC. ', el('strong', {}, 'Business'), ' lines go to IFS, ', el('strong', {}, 'Personal'), ' lines stay in the app so you keep one record of everything.'),
       el('li', {}, 'A sheet here is one IFS expense sheet. Create the sheet in IFS, then type its Expense ID and project short name under “Sheets…”. Rates come from the Central Bank for each line’s date.'),
       el('li', {}, 'At month end follow the “Month close” list: press ', el('strong', {}, 'Copy for IFS'), ', paste into the Expense Details grid (right-click → Edit → Paste Object), save in IFS, then press “Mark as entered”. Lines added later are exported on their own with “Copy new lines”.'),
       el('li', {}, 'A trip creates the per diem line on the sheet and shows what you spent against it.')),
-    el('button', { class: 'link', onclick: () => { try { localStorage.setItem('ifsbridge.expHelp', 'off'); } catch {} paintHelp(); } }, 'Got it, hide this')));
+    el('button', { class: 'link', onclick: () => { try { localStorage.setItem(scopedKey('ifsbridge.expHelp'), 'off'); } catch {} paintHelp(); } }, 'Got it, hide this')));
 }
 
 function paintHead() {
   const host = $('#exp-head');
   const sheet = currentSheet();
-  const sel = el('select', { class: 'sheet-select', 'aria-label': 'Sheet', onchange: e => setSheet(e.target.value) },
-    data.sheets.map(s => el('option', { value: s.id, selected: s.id === sheet.id }, `${s.title || 'Sheet'}${s.expenseId ? ` · IFS ${s.expenseId}` : ' · no IFS ID yet'}${s.status === 'entered' ? ' ✓' : ''}`)));
+  const sel = el('select', { class: 'sheet-select', 'aria-label': personalSpace() ? 'Collection' : 'Sheet', onchange: e => setSheet(e.target.value) },
+    data.sheets.map(s => el('option', { value: s.id, selected: s.id === sheet.id }, personalSpace() ? s.title || 'Collection' : `${s.title || 'Sheet'}${s.expenseId ? ` · IFS ${s.expenseId}` : ' · no IFS ID yet'}${s.status === 'entered' ? ' ✓' : ''}`)));
   const c = supabaseClient();
   host.replaceChildren(
     sel,
-    el('button', { onclick: openSheetsDialog }, 'Sheets…'),
-    el('button', { class: 'icon', title: 'Show the explanation again', 'aria-label': 'Help', onclick: () => { try { localStorage.removeItem('ifsbridge.expHelp'); } catch {} paintHelp(); } }, '?'),
+    el('button', { onclick: personalSpace() ? openPersonalSheetsDialog : openSheetsDialog }, personalSpace() ? 'Collections…' : 'Sheets…'),
+    el('button', { type: 'button', onclick: () => openExpenseTools() }, 'Tools'),
+    el('button', { class: 'icon', title: 'Show the explanation again', 'aria-label': 'Help with expenses', onclick: () => { try { localStorage.removeItem(scopedKey('ifsbridge.expHelp')); } catch {} paintHelp(true); $('#exp-help summary')?.focus(); } }, '?'),
     el('span', { id: 'exp-sync', class: 'sync-state' }, !c.configured ? 'On this device only' : c.signedIn ? 'Sync on' : 'Not signed in'));
 }
 
@@ -191,14 +292,25 @@ function paintSummary() {
   const sheet = currentSheet();
   const lines = sheetLines();
   const s = settings();
+  if (personalSpace()) {
+    const money = Object.entries(totalsByCurrency(lines)).map(([cur, n]) => fmtMoney(n, cur)).join(' + ') || '0.00';
+    host.replaceChildren(el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'Net spending'), el('b', {}, money), el('small', {}, `${lines.length} expenses and refunds · currencies kept separate`)));
+    return;
+  }
+  alignRateField();
   const biz = lines.filter(l => l.business), pers = lines.filter(l => !l.business);
   const enteredCount = biz.filter(l => l.entered).length, newCount = biz.length - enteredCount;
   const money = ls => Object.entries(totalsByCurrency(ls)).map(([cur, n]) => fmtMoney(n, cur)).join(' + ') || '0.00';
   const expAll = buildExpenseExport(sheet, lines, s, rateCache.byKey);
   const expNew = buildExpenseExport(sheet, lines, s, rateCache.byKey, { onlyNew: true });
 
-  // fetch missing rates in the background, then repaint once
-  if (expAll.unrated.length && s.rateSource !== 'manual') ensureRates(lines).then(got => { if (got) paintSummary(); });
+  // Try each missing currency/date once. A failed request waits for Retry or online.
+  const keys = foreignRateKeys(lines);
+  if (expAll.unrated.length && s.rateSource !== 'manual' && keys.some(k => !rateCache.byKey[k] && !rateFailed.has(k) && !ratePending.has(k))) {
+    ensureRates(lines).then(() => paint(['summary']));
+  }
+  const loadingRates = s.rateSource !== 'manual' && keys.some(k => ratePending.has(k));
+  const failedRates = s.rateSource === 'manual' ? [] : keys.filter(k => rateFailed.has(k));
 
   const copy = async exp => {
     try { await navigator.clipboard.writeText(exp.text); toast(`Copied ${exp.count} line${exp.count === 1 ? '' : 's'}. Paste into the IFS Expense Details grid.`); if (sheet.status === 'open') { await save('sheets', { ...sheet, status: 'exported' }); refresh(['head', 'summary']); scheduleSync(); } }
@@ -241,7 +353,8 @@ function paintSummary() {
     el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'Personal'), el('b', {}, money(pers)), el('small', {}, `${pers.length} line${pers.length === 1 ? '' : 's'}, stays here`)),
     el('div', { class: 'sum-line' },
       sheet.shortName ? el('code', {}, sheet.shortName) : el('span', { class: 'warn-text' }, 'project short name not set'),
-      el('span', { class: ratesOk ? 'muted' : 'warn-text', title: rateText }, ratesOk ? 'rates ✓' : `${expAll.unrated.length} line${expAll.unrated.length === 1 ? '' : 's'} without a rate`),
+      el('span', { id: 'exp-rate-status', role: 'status', 'aria-live': 'polite', class: ratesOk ? 'muted' : 'warn-text', title: rateText }, loadingRates ? 'Fetching exchange rates…' : ratesOk ? 'rates ✓' : failedRates.length ? `Could not load ${failedRates.length} date rate${failedRates.length === 1 ? '' : 's'}` : `${expAll.unrated.length} line${expAll.unrated.length === 1 ? '' : 's'} without a rate`),
+      failedRates.length ? el('button', { type: 'button', class: 'link', disabled: loadingRates, title: `Retry ${failedRates.map(k => k.replace('|', ' ')).join(', ')}`, onclick: retryRates }, 'Retry rates') : null,
       el('button', { class: 'link', onclick: openSheetsDialog }, 'change'),
       stateText ? el('span', { class: expAll.error ? 'warn-text' : 'muted' }, stateText) : null),
     el('div', { class: 'sum-actions' }, copyBtn, copyAllBtn, enteredBtn, viewBtn,
@@ -251,16 +364,24 @@ function paintSummary() {
 
 function paintTools() {
   const host = $('#exp-tools');
-  const search = el('input', { type: 'search', placeholder: 'Search this sheet', value: state.search, oninput: e => { state.search = e.target.value.trim().toLowerCase(); paintList(); } });
-  const chips = el('div', { class: 'chips', role: 'group' }, [['all', 'All'], ['business', 'Business'], ['personal', 'Personal']].map(([k, l]) =>
-    el('button', { type: 'button', class: 'chip' + (state.filter === k ? ' on' : ''), 'aria-pressed': state.filter === k, onclick: e => { state.filter = k; for (const b of chips.children) { b.classList.toggle('on', b === e.currentTarget); b.setAttribute('aria-pressed', b === e.currentTarget); } paintList(); } }, l)));
+  const search = el('input', { id: 'exp-search', type: 'search', 'aria-label': personalSpace() ? 'Search expenses in this collection' : 'Search expenses in this sheet', 'aria-controls': 'exp-list', placeholder: 'Search description, vendor, date…', value: state.search, oninput: e => { state.search = e.target.value; paintList(); } });
+  const chips = el('div', { class: 'chips', role: 'group', 'aria-label': 'Expense type' }, (personalSpace() ? [['all', 'All']] : [['all', 'All'], ['business', 'Business'], ['personal', 'Personal']]).map(([k, l]) =>
+    el('button', { type: 'button', class: 'chip' + (state.filter === k ? ' on' : ''), 'data-filter': k, 'aria-pressed': String(state.filter === k), onclick: () => { state.filter = k; paintList(); } }, l)));
   const months = [...new Set(sheetLines().map(l => (l.date || '').slice(0, 7)).filter(Boolean))].sort().reverse();
   if (state.month && !months.includes(state.month)) state.month = '';
-  const monthChips = el('div', { class: 'chips months', role: 'group' }, el('span', { class: 'chips-label' }, 'Month'), [['', 'All'], ...months.map(m => [m, monthLabel(m)])].map(([k, l]) =>
-    el('button', { type: 'button', class: 'chip' + (state.month === k ? ' on' : ''), 'aria-pressed': state.month === k, onclick: e => { state.month = k; for (const b of monthChips.querySelectorAll('.chip')) { b.classList.toggle('on', b === e.currentTarget); b.setAttribute('aria-pressed', b === e.currentTarget); } paintList(); } }, l)));
-  const sortSel = el('select', { class: 'sort-select', 'aria-label': 'Order within a day', onchange: e => { state.sort = e.target.value; try { localStorage.setItem('ifsbridge.expSort', state.sort); } catch {} paintList(); } },
-    [['order', 'In receipt order'], ['bizFirst', 'Business first, then personal'], ['persFirst', 'Personal first, then business']].map(([v, l]) => el('option', { value: v, selected: state.sort === v }, l)));
-  host.replaceChildren(...[el('button', { class: 'primary add-desktop', onclick: () => openLineDialog(null) }, '+ Add expense'), chips, search, sortSel, months.length > 1 ? monthChips : null].filter(Boolean));
+  const monthChips = el('div', { class: 'chips months', role: 'group', 'aria-label': 'Expense month' }, el('span', { class: 'chips-label' }, 'Month'), [['', 'All'], ...months.map(m => [m, monthLabel(m)])].map(([k, l]) =>
+    el('button', { type: 'button', class: 'chip' + (state.month === k ? ' on' : ''), 'data-month': k, 'aria-pressed': String(state.month === k), onclick: () => { state.month = k; paintList(); } }, l)));
+  const sortSel = el('select', { class: 'sort-select', 'aria-label': 'Order within a day', onchange: e => { state.sort = e.target.value; try { localStorage.setItem(scopedKey('ifsbridge.expSort'), state.sort); } catch {} paintList(); } },
+    (personalSpace() ? [['order', 'In receipt order']] : [['order', 'In receipt order'], ['bizFirst', 'Business first, then personal'], ['persFirst', 'Personal first, then business']]).map(([v, l]) => el('option', { value: v, selected: state.sort === v }, l)));
+  const results = el('div', { class: 'exp-results' },
+    el('span', { id: 'exp-results-count', class: 'exp-results-count muted', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }),
+    el('button', { id: 'exp-clear-filters', type: 'button', class: 'link', onclick: () => {
+      state.filter = 'all'; state.month = ''; state.search = '';
+      search.value = '';
+      paintList();
+      search.focus();
+    } }, 'Clear filters'));
+  host.replaceChildren(...[el('button', { class: 'primary add-desktop', onclick: () => openLineDialog(null) }, '+ Add expense'), personalSpace() ? null : chips, search, personalSpace() ? null : sortSel, months.length > 1 ? monthChips : null, results].filter(Boolean));
 }
 
 // Move a line one place up or down among the lines of the same date (receipt order).
@@ -279,17 +400,35 @@ function paintList() {
   const host = $('#exp-list');
   const all = sheetLines();
   const anyEntered = all.some(l => l.entered);
+  const query = state.search.trim().toLowerCase();
   const lines = all.filter(l => state.filter === 'all' || (state.filter === 'business') === !!l.business)
     .filter(l => !state.month || (l.date || '').startsWith(state.month))
-    .filter(l => !state.search || [l.written, l.vendor, l.costObject, codeOf(l.code)?.short, String(l.amount)].join(' ').toLowerCase().includes(state.search))
+    .filter(l => !query || [l.written, l.vendor, l.costObject, l.date, l.currency, l.code, codeOf(l.code)?.short, String(l.amount)].join(' ').toLowerCase().includes(query))
     .sort(lineOrder);
+  // Update controls in place so typing and keyboard focus survive each filter change.
+  for (const button of $('#exp-tools').querySelectorAll('[data-filter], [data-month]')) {
+    const selected = button.hasAttribute('data-filter') ? button.dataset.filter === state.filter : button.dataset.month === state.month;
+    button.classList.toggle('on', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+  const filtered = state.filter !== 'all' || !!state.month || !!query;
+  const count = $('#exp-results-count');
+  if (count) count.textContent = filtered ? `Showing ${lines.length} of ${all.length} expenses in this ${personalSpace() ? 'collection' : 'sheet'}` : `${all.length} expense${all.length === 1 ? '' : 's'} in this ${personalSpace() ? 'collection' : 'sheet'}`;
+  const clear = $('#exp-clear-filters');
+  if (clear) clear.disabled = !filtered && !state.search;
   const refs = numberReceipts(all);
   host.replaceChildren();
-  if (!lines.length) { host.append(el('p', { class: 'empty' }, all.length ? 'Nothing matches the filter.' : 'No expenses on this sheet yet. Tap + to add the first one.')); return; }
+  if (!lines.length) {
+    host.append(el('div', { class: 'empty expense-empty' },
+      el('h3', {}, all.length ? 'No expenses match your filters' : 'Add your first expense'),
+      el('p', {}, all.length ? personalSpace() ? 'Try another search or clear the filters to see this collection’s expenses.' : 'Try another search, choose All, or use Clear filters above to see this sheet’s expenses.' : personalSpace() ? 'Add a purchase or a refund. Receipt photos, imports and budgets are available under Tools.' : 'Add an amount now and include a receipt when you have it.'),
+      !all.length ? el('button', { type: 'button', class: 'primary', onclick: () => openLineDialog(null) }, '+ Add expense') : null));
+    return;
+  }
   if (state.month) {
     const biz = lines.filter(l => l.business), pers = lines.filter(l => !l.business);
     const money = ls => Object.entries(totalsByCurrency(ls)).map(([c, n]) => fmtMoney(n, c)).join(' + ') || '0.00';
-    host.append(el('div', { class: 'month-total' }, el('b', {}, monthLabel(state.month)), el('span', {}, `To IFS ${money(biz)}`), el('span', {}, `Personal ${money(pers)}`), el('span', { class: 'muted' }, `${lines.length} line${lines.length === 1 ? '' : 's'}`)));
+    host.append(el('div', { class: 'month-total' }, el('b', {}, monthLabel(state.month)), personalSpace() ? el('span', {}, `Net spending ${money(lines)}`) : el('span', {}, `To IFS ${money(biz)}`), personalSpace() ? null : el('span', {}, `Personal ${money(pers)}`), el('span', { class: 'muted' }, `${lines.length} line${lines.length === 1 ? '' : 's'}`)));
   }
   const byDate = new Map();
   for (const l of lines) { if (!byDate.has(l.date)) byDate.set(l.date, []); byDate.get(l.date).push(l); }
@@ -318,6 +457,8 @@ function paintList() {
               l.business ? el('span', { class: 'pill ' + (l.receipt ? 'rec' : 'norec') }, l.receipt ? `Receipt #${refs.get(l.id)}` : 'No receipt') : el('span', { class: 'pill pers' }, 'Personal'),
               l.business && l.entered ? el('span', { class: 'pill inifs', title: `Entered in IFS ${fmtWhen(l.enteredAt)}` }, 'In IFS') : null,
               l.business && !l.entered && anyEntered ? el('span', { class: 'pill newline' }, 'New') : null,
+              reimbursementSummary(l).eligible && (l.reimbursement?.stage || l.reimbursement?.payments?.length) ? el('span', { class: 'pill reimbursement' }, { awaiting: 'Awaiting payment', partial: 'Partly paid', paid: 'Paid' }[reimbursementSummary(l).status]) : null,
+              Number(l.amount) < 0 ? el('span', { class: 'pill' }, 'Refund') : null,
               l.perdiem ? el('span', { class: 'pill pd' }, 'Per diem') : null,
               photos ? el('span', { class: 'pill photo', title: `${photos} photo${photos === 1 ? '' : 's'}` }, `📷${photos > 1 ? ' ' + photos : ''}`) : null)),
           el('span', { class: 'move' + (dayAll.length > 1 && state.sort === 'order' ? '' : ' none'), onclick: ev => ev.stopPropagation(), onkeydown: ev => ev.stopPropagation() },
@@ -329,6 +470,11 @@ function paintList() {
 
 function paintTrips() {
   const host = $('#exp-trips');
+  if (personalSpace()) {
+    host.replaceChildren(el('details', { class: 'trips-fold' }, el('summary', {}, `Trips (${data.trips.length})`), el('button', { onclick: () => openPersonalTripDialog() }, '+ Add trip'),
+      el('div', { class: 'trip-list' }, data.trips.map(tr => el('button', { class: 'trip', onclick: () => openPersonalTripDialog(tr) }, el('b', {}, tr.name), el('small', {}, `${tr.start} → ${tr.end}`))))));
+    return;
+  }
   const fmt = ls => Object.entries(totalsByCurrency(ls)).map(([c, n]) => fmtMoney(n, c)).join(' + ') || '—';
   const cards = data.trips.map(tr => {
     const ls = data.lines.filter(l => l.tripId === tr.id);
@@ -343,14 +489,51 @@ function paintTrips() {
         el('span', {}, el('i', {}, 'Reimbursed'), fmt(reimb)), el('span', { class: 'net' }, el('i', {}, 'Net'), Object.entries(net).map(([c, n]) => fmtMoney(Math.round(n * 100) / 100, c)).join(' + ') || '—')));
   });
   let open = false;
-  try { open = localStorage.getItem('ifsbridge.tripsOpen') === 'open'; } catch {}
-  host.replaceChildren(el('details', { class: 'trips-fold', open, ontoggle: ev => { try { localStorage.setItem('ifsbridge.tripsOpen', ev.target.open ? 'open' : 'closed'); } catch {} } },
+  try { open = localStorage.getItem(scopedKey('ifsbridge.tripsOpen')) === 'open'; } catch {}
+  host.replaceChildren(el('details', { class: 'trips-fold', open, ontoggle: ev => { try { localStorage.setItem(scopedKey('ifsbridge.tripsOpen'), ev.target.open ? 'open' : 'closed'); } catch {} } },
     el('summary', {}, `Trips and per diem (${data.trips.length})`),
     el('div', { class: 'row' }, el('button', { onclick: () => openTripDialog(null) }, '+ Add trip'), el('span', { class: 'help' }, 'A trip creates the per diem line on its sheet; its personal lines count as out of pocket, business lines as reimbursed.')),
     cards.length ? el('div', { class: 'trip-list' }, cards) : el('p', { class: 'empty' }, 'No trips yet.')));
 }
 
 // ---------- dialogs ----------
+export function resetExpenseView() {
+  state.sheetId = null; state.filter = 'all'; state.month = ''; state.search = ''; built = false;
+  data = { sheets: [], lines: [], trips: [] }; rateCache = { field: '', byKey: {} }; ratePending = new Map(); rateFailed.clear();
+}
+export async function openExpense(id) {
+  if (personalSpace()) await load(); else await render();
+  assertScopeCurrent();
+  const row = data.lines.find(l => l.id === id);
+  if (!row) { toast('This expense is no longer available in this space.'); return; }
+  if (personalSpace()) { state.sheetId = data.sheets.some(s => s.id === row.sheetId) ? row.sheetId : state.sheetId; return openLineDialog(row); }
+  await setSheet(row.sheetId); state.filter = 'all'; state.month = ''; state.search = ''; paintAll(); openLineDialog(row);
+}
+export async function showExpenseAttention(kind) {
+  if (personalSpace()) await load(); else await render();
+  assertScopeCurrent();
+  if (kind === 'inbox') return openInbox();
+  const rows = data.lines.filter(l => !l.perdiem && (kind === 'receipts' ? !l.receipt && !photoIdsOf(l).length : kind === 'rates' ? l.business && !l.entered && !rateFor(l, data.sheets.find(s => s.id === l.sheetId), settings(), rateCache.byKey).rate : true));
+  const host = el('div', { class: 'workflow-list' });
+  const dialog = openDialog(kind === 'receipts' ? 'Expenses missing receipts' : kind === 'rates' ? 'Expenses missing currency rates' : 'Expenses needing attention', host);
+  for (const row of rows) host.append(el('button', { class: 'workflow-menu-item', onclick: () => { dialog.close(); openExpense(row.id); } }, el('b', {}, row.written || 'Expense'), el('small', {}, `${row.date} · ${fmtMoney(row.amount, row.currency)} · ${personalSpace() ? row.merchant || row.vendor || '' : data.sheets.find(s => s.id === row.sheetId)?.title || 'Sheet'}`)));
+  if (!rows.length) host.append(el('p', { class: 'empty' }, 'Nothing needs attention here.'));
+}
+
+function openPersonalSheetsDialog() {
+  const sheet = currentSheet(), title = el('input', { value: sheet.title }), newTitle = el('input', { value: '', placeholder: 'Collection name' }), status = el('p', { class: 'help', role: 'status' });
+  const d = openDialog('Collections', el('div', { class: 'form' }, field('Current collection', title),
+    el('button', { onclick: async () => { try { assertScopeCurrent(); if (!title.value.trim()) throw Error('Enter a collection name.'); await atomicBatchSave([{ table: 'sheets', record: { ...sheet, title: title.value.trim(), autoCreated: false }, expectedUpdatedAt: sheet.updated_at ?? null }], { label: 'Rename expense collection' }); await refresh(); scheduleSync(); d.close(); } catch (error) { status.textContent = error.message; } } }, 'Rename'),
+    field('New collection', newTitle), el('button', { onclick: async () => { try { assertScopeCurrent(); if (!newTitle.value.trim()) throw Error('Enter a collection name.'); const added = await save('sheets', { title: newTitle.value.trim(), status: 'open', created_at: new Date().toISOString() }); await load(); await setSheet(added.id); scheduleSync(); d.close(); } catch (error) { status.textContent = error.message; } } }, 'Create collection'),
+    el('div', { class: 'workflow-list' }, data.sheets.filter(s => s.id !== sheet.id).map(s => el('button', { onclick: async () => { await setSheet(s.id); d.close(); } }, s.title))), status));
+}
+
+function openPersonalTripDialog(existing = null) {
+  const name = el('input', { value: existing?.name || '' }), start = el('input', { type: 'date', value: existing?.start || todayIso() }), end = el('input', { type: 'date', value: existing?.end || todayIso() }), status = el('p', { class: 'help', role: 'status' });
+  const d = openDialog(existing ? 'Edit trip' : 'New trip', el('div', { class: 'form' }, field('Trip name', name), field('Start date', start), field('End date', end),
+    el('button', { class: 'primary', onclick: async () => { try { assertScopeCurrent(); if (!name.value.trim() || !start.value || !end.value || end.value < start.value) throw Error('Enter a trip name and a valid date range.'); await atomicBatchSave([{ table: 'trips', record: { ...existing, name: name.value.trim(), start: start.value, end: end.value, days: Math.round((Date.parse(end.value) - Date.parse(start.value)) / 86400000) + 1, sheetId: state.sheetId, created_at: existing?.created_at || new Date().toISOString() }, expectedUpdatedAt: existing?.updated_at ?? null }], { label: 'Save personal trip' }); await refresh(); scheduleSync(); d.close(); } catch (error) { status.textContent = error.message; } } }, 'Save trip'), status));
+}
+
 function recent(key, limit = 8, extra = []) {
   const seen = new Set(extra.filter(Boolean));
   const out = [...extra.filter(Boolean)];
@@ -387,15 +570,20 @@ function openLineDialog(line, prefill = null) {
   const s = settings();
   const sheet = currentSheet();
   const isNew = !line;
-  const e = line ? { ...line } : { sheetId: sheet.id, date: todayIso(), amount: '', currency: s.defaultCurrency, code: 7301, written: '', vendor: '', business: true, receipt: true, costObject: s.costObjects[0] || '', tripId: '', ...(prefill || {}) };
+  const e = line ? { ...line } : { sheetId: sheet.id, date: todayIso(), amount: '', currency: s.defaultCurrency, code: personalSpace() ? s.expenseCodes[0]?.code : 7301, written: '', vendor: '', business: !personalSpace(), receipt: !personalSpace(), costObject: personalSpace() ? '' : s.costObjects[0] || '', tripId: '', ...(prefill || {}) };
+  if (personalSpace()) { e.business = false; e.vendor = e.merchant ?? e.vendor ?? ''; e.written = e.note ?? e.written ?? ''; }
   let business = !!e.business, receipt = !!e.receipt, dupAccepted = false;
   const photos = photoIdsOf(e).map(id => ({ id, blob: null, isNew: false }));
 
-  const amount = el('input', { type: 'number', step: '0.01', inputmode: 'decimal', placeholder: '0.00', value: e.amount, class: 'big', autofocus: true });
-  const cur = el('select', { class: 'cur' }, s.currencies.map(c => el('option', { value: c, selected: c === e.currency }, c)));
+  const amount = el('input', { type: 'number', 'aria-label': 'Amount', step: '0.01', inputmode: 'decimal', placeholder: '0.00', value: personalSpace() && e.amount !== '' ? Math.abs(Number(e.amount)) : e.amount, min: personalSpace() ? '0.01' : undefined, class: 'big', autofocus: true });
+  const cur = el('select', { class: 'cur', 'aria-label': 'Currency' }, (personalSpace() ? [...new Set([...s.currencies, e.currency].filter(Boolean))] : s.currencies).map(c => el('option', { value: c, selected: c === e.currency }, c)));
+  const direction = el('select', { 'aria-label': 'Transaction kind' }, [['purchase', 'Purchase'], ['refund', 'Refund']].map(([value, label]) => el('option', { value, selected: value === (isNew && e.kind === 'refund' || Number(e.amount) < 0 ? 'refund' : 'purchase') }, label)));
+  const signedAmount = () => Number(String(amount.value).replace(',', '.')) * (personalSpace() && direction.value === 'refund' ? -1 : 1);
   const date = el('input', { type: 'date', value: e.date });
   const dateChips = el('div', { class: 'chips small' }, [['Today', todayIso()], ['Yesterday', shiftIso(todayIso(), -1)]].map(([l, v]) => el('button', { type: 'button', class: 'chip', onclick: () => { date.value = v; updateRef(); checkDup(); } }, l)));
-  const code = el('select', {}, s.expenseCodes.map(c => el('option', { value: c.code, selected: String(c.code) === String(e.code) }, `${c.short}  (${c.code})`)));
+  const code = el('select', {}, s.expenseCodes.map(c => el('option', { value: c.code, selected: String(c.code) === String(e.code) }, personalSpace() ? c.short : `${c.short}  (${c.code})`)));
+  const categoryName = e.personalCategory || e.category || codeOf(e.code)?.short || s.expenseCodes[0]?.short || 'Other';
+  const category = el('select', {}, [...new Set([...s.expenseCodes.map(c => c.short), ...data.lines.map(l => l.personalCategory).filter(Boolean), categoryName])].map(name => el('option', { value: name, selected: name === categoryName }, name)));
   const written = el('input', { type: 'text', value: e.written, placeholder: 'e.g. Gas, Dinner, Coffee', autocapitalize: 'sentences' });
   const vendor = el('input', { type: 'text', value: e.vendor, placeholder: 'e.g. Shell, Starbucks, hotel name' });
   const costObj = el('input', { type: 'text', value: e.costObject, placeholder: '/Personal 1' });
@@ -450,7 +638,7 @@ function openLineDialog(line, prefill = null) {
       return el('span', { class: 'thumb' }, img, missing, el('button', { type: 'button', class: 'thumb-x', title: 'Remove photo', 'aria-label': 'Remove photo', onclick: () => { photos.splice(photos.indexOf(p), 1); paintGallery(); } }, '×'));
     }));
   }
-  function setBiz(b) { business = b; bizBtn.classList.toggle('on', b); persBtn.classList.toggle('on', !b); bizHelp.textContent = b ? 'Exported to IFS with the reference shown below.' : 'Stays in the app only. Useful to track spending on a per diem trip.'; receiptRow.hidden = !b; shortField.hidden = !b; updateRef(); }
+  function setBiz(b) { business = personalSpace() ? false : b; b = business; bizBtn.classList.toggle('on', b); persBtn.classList.toggle('on', !b); bizHelp.textContent = b ? 'Exported to IFS with the reference shown below.' : 'Personal spending. Use a negative amount for a refund.'; receiptRow.hidden = false; recChk.closest('label').hidden = !b; shortField.hidden = !b; updateRef(); }
   function updateRef() {
     if (!business) { refLine.textContent = ''; refLine.hidden = true; return; }
     const draft = { ...e, id: e.id || '__draft', date: date.value, business: true, receipt, written: written.value.trim(), costObject: costObj.value.trim(), created_at: e.created_at || '9999' };
@@ -460,70 +648,97 @@ function openLineDialog(line, prefill = null) {
     refLine.hidden = false;
     refLine.replaceChildren(el('span', { class: 'k' }, 'IFS reference: '), el('code', {}, referenceText(draft, ref)), el('span', { class: 'k' }, ' · project: '), project ? el('code', {}, project) : el('span', { class: 'warn-text' }, 'not set'));
   }
-  function checkDup() {
-    const amt = Number(String(amount.value).replace(',', '.'));
+  function checkDup(resetAcceptance = true) {
+    const amt = signedAmount();
     const dups = amt ? duplicatesOf({ id: e.id, date: date.value, amount: amt, currency: cur.value }) : [];
-    dupAccepted = false;
-    saveBtn.textContent = isNew ? 'Add expense' : 'Save';
+    if (resetAcceptance) { dupAccepted = false; saveBtn.textContent = isNew ? 'Add expense' : 'Save'; }
     if (!dups.length) { dupBox.hidden = true; return []; }
     dupBox.hidden = false;
-    dupBox.replaceChildren(el('b', {}, 'Possible duplicate: '), dups.map(d => { const sh = data.sheets.find(x => x.id === d.sheetId); return `${d.written || codeOf(d.code)?.short || 'expense'} ${fmtMoney(d.amount, d.currency)} on ${fmtDate(d.date)}${sh && sh.id !== sheet.id ? ` (${sh.title})` : ''}`; }).join('; '), '. Press the button again to keep both.');
+    dupBox.replaceChildren(el('b', {}, 'Possible duplicate: '), dups.map(d => { const sh = data.sheets.find(x => x.id === d.sheetId); return `${d.written || codeOf(d.code)?.short || 'expense'} ${fmtMoney(d.amount, d.currency)} on ${fmtDate(d.date)}${!personalSpace() && sh && sh.id !== sheet.id ? ` (${sh.title})` : ''}`; }).join('; '), '. Press the button again to keep both.');
     return dups;
   }
   for (const i of [written, costObj, shortIn]) i.addEventListener('input', updateRef);
   date.addEventListener('change', () => { updateRef(); checkDup(); });
   amount.addEventListener('input', checkDup);
   cur.addEventListener('change', checkDup);
+  direction.addEventListener('change', checkDup);
   receiptRow.append(el('label', { class: 'inline check' }, recChk, ' I have the receipt'), photoBtn, photoIn);
   paintGallery();
 
+  let savingLine = false;
   const saveLine = async (andAnother = false) => {
-    const amt = Number(String(amount.value).replace(',', '.'));
+    if (savingLine) return;
+    let amt = signedAmount();
+    if (personalSpace()) {
+      try {
+        const minor = minorAmount(amount.value);
+        if (minor <= 0) throw Error('Enter a positive amount and choose Purchase or Refund.');
+        amt = minor / 100 * (direction.value === 'refund' ? -1 : 1);
+      } catch (error) { status.textContent = error.message; amount.focus(); return; }
+    }
     if (!date.value) { status.textContent = 'Pick a date.'; return; }
     if (!amt) { status.textContent = 'Enter the amount (negative for a refund).'; amount.focus(); return; }
-    if (checkDup().length && !dupAccepted) { dupAccepted = true; saveBtn.textContent = isNew ? 'Add anyway' : 'Save anyway'; status.textContent = 'Looks like a duplicate. Press again if it is a separate expense.'; return; }
+    if (checkDup(false).length && !dupAccepted) { dupAccepted = true; saveBtn.textContent = isNew ? 'Add anyway' : 'Save anyway'; status.textContent = 'Looks like a duplicate. Press again if it is a separate expense.'; return; }
+    savingLine = true; saveBtn.disabled = true;
+    try {
+    assertScopeCurrent();
     const row = { ...e, sheetId: sheetSel.value || e.sheetId, date: date.value, amount: Math.round(amt * 100) / 100, currency: cur.value, code: Number(code.value), written: written.value.trim(), vendor: vendor.value.trim(), business, receipt: business ? receipt : false, costObject: costObj.value.trim(), shortName: business ? shortIn.value.trim() : '', tripId: trip.value || '', created_at: e.created_at || new Date().toISOString() };
+    if (personalSpace()) {
+      // Keep the signed amount as the shared calculation format; these fields preserve spending detail.
+      row.personalCategory = category.value; row.code = Number(s.expenseCodes.find(c => c.short === category.value)?.code || e.code || s.expenseCodes[0]?.code);
+      row.merchant = row.vendor; row.note = row.written; row.kind = row.amount < 0 ? 'refund' : 'purchase';
+      row.costObject = ''; row.shortName = ''; row.tripId = ''; row.perdiem = false;
+    }
     if (!business) { row.entered = false; row.enteredAt = ''; }
-    for (const p of photos.filter(p => p.isNew && p.blob)) await db.put('receipts', { id: p.id, blob: p.blob, dirty: true });
+    validateExpenseChange(e, row);
     row.receiptIds = photos.map(p => p.id);
     delete row.receiptId;
     if (row.shortName && !(s.knownShortNames || []).includes(row.shortName)) { s.knownShortNames = [...(s.knownShortNames || []), row.shortName]; ctx.saveSettings(s); }
     if (row.costObject && !s.costObjects.includes(row.costObject)) { s.costObjects.push(row.costObject); ctx.saveSettings(s); }
-    await save('expenses', row);
+    await atomicBatchSave([...photos.filter(p => p.isNew && p.blob).map(p => ({ table: 'receipts', record: { id: p.id, blob: p.blob, dirty: true }, expectedUpdatedAt: null })), { table: 'expenses', record: row, expectedUpdatedAt: isNew ? null : (e.updated_at ?? null) }], { label: isNew ? 'Add expense' : 'Edit expense' });
     d.close();
     toast(isNew ? 'Expense added' : 'Saved');
-    await refresh();
+    await refresh(undefined, { entry: row });
     scheduleSync();
-    if (andAnother) openLineDialog(null, { date: row.date, currency: row.currency, costObject: row.costObject, tripId: row.tripId, business: row.business });
+    if (andAnother) openLineDialog(null, { date: row.date, currency: row.currency, costObject: row.costObject, tripId: row.tripId, business: row.business, ...(personalSpace() ? { personalCategory: row.personalCategory, kind: row.kind } : {}) });
+    } catch (error) { status.textContent = error.message; }
+    finally { savingLine = false; if (saveBtn.isConnected) saveBtn.disabled = false; }
   };
 
+  const noteField = field(personalSpace() ? 'Note' : 'Written expense', el('div', {}, written, chipRow(recent('written', 8, [codeOf(e.code)?.short]), written)), personalSpace() ? 'Optional details about this purchase or refund.' : 'Short text that goes to IFS inside the reference.');
+  const merchantField = field(personalSpace() ? 'Merchant' : 'Explanation', el('div', {}, vendor, chipRow(recent('vendor'), vendor)), personalSpace() ? '' : 'Vendor or details for yourself. Stays in the app, never sent to IFS.');
   const body = el('div', { class: 'form' },
     el('span', { class: 'lbl' }, 'Amount'),
     el('div', { class: 'amount-row' }, amount, cur),
+    personalSpace() ? field('Kind', direction, 'Enter the amount above as a positive number.') : el('small', { class: 'help' }, 'Positive for a purchase; negative for a refund.'),
     ocrBox,
     dupBox,
     field('Date', el('div', {}, date, dateChips)),
-    field('Type', code, 'The IFS expense type. The number is the IFS expense code.'),
-    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Who pays'), el('div', { class: 'segs' }, bizBtn, persBtn), bizHelp),
+    field(personalSpace() ? 'Category' : 'Type', personalSpace() ? category : code, personalSpace() ? 'Used in spending reports and budgets.' : 'The IFS expense type. The number is the IFS expense code.'),
+    personalSpace() ? null : el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Who pays'), el('div', { class: 'segs' }, bizBtn, persBtn), bizHelp),
     receiptRow,
     gallery,
-    field('Written expense', el('div', {}, written, chipRow(recent('written', 8, [codeOf(e.code)?.short]), written)), 'Short text that goes to IFS inside the reference.'),
-    field('Explanation', el('div', {}, vendor, chipRow(recent('vendor'), vendor)), 'Vendor or details for yourself. Stays in the app, never sent to IFS.'),
-    el('details', { class: 'more-opts', open: !!(e.shortName || e.tripId || (e.costObject && e.costObject !== (s.costObjects[0] || ''))) },
-      el('summary', {}, 'More: cost object, project, trip' + (isNew ? '' : ', sheet')),
-      field('Cost object', el('div', {}, costObj, chipRow([...new Set([...s.costObjects, ...recent('costObject')])], costObj, { label: 'Choose' })), 'The “Person” column of the workbook (/Personal 1, /16 QP 16). Part of the IFS reference.'),
+    personalSpace() ? [merchantField, noteField] : [noteField, merchantField],
+    personalSpace() ? null : el('details', { class: 'more-opts', open: !!(e.shortName || e.tripId || (e.costObject && e.costObject !== (s.costObjects[0] || ''))) },
+      el('summary', {}, personalSpace() ? 'More: trip and collection' : 'More: cost object, project, trip' + (isNew ? '' : ', sheet')),
+      personalSpace() ? null : field('Cost object', el('div', {}, costObj, chipRow([...new Set([...s.costObjects, ...recent('costObject')])], costObj, { label: 'Choose' })), 'The “Person” column of the workbook (/Personal 1, /16 QP 16). Part of the IFS reference.'),
       shortField,
       data.trips.length ? field('Trip', trip, 'Link the line to a trip to compare it with the per diem.') : null,
-      isNew ? null : field('Sheet', sheetSel, 'Change it to move the line to another sheet.')),
+      isNew ? null : field(personalSpace() ? 'Collection' : 'Sheet', sheetSel, 'Change it to move this expense.')),
     refLine,
-    e.entered ? el('p', { class: 'help' }, `This line is marked as entered in IFS (${fmtWhen(e.enteredAt)}). Changes here do not change IFS.`) : null,
+    e.entered && !personalSpace() ? el('p', { class: 'help' }, `This line is marked as entered in IFS (${fmtWhen(e.enteredAt)}). Changes here do not change IFS.`) : null,
     el('div', { class: 'actions' },
       saveBtn,
-      isNew ? el('button', { onclick: () => saveLine(true) }, 'Add and next') : el('button', { onclick: () => { d.close(); openLineDialog(null, { ...e, id: undefined, receiptId: undefined, receiptIds: undefined, seq: undefined, created_at: undefined, perdiem: false, entered: false, enteredAt: '' }); } }, 'Add similar'),
+      isNew ? el('button', { onclick: () => saveLine(true) }, 'Add and next') : el('button', { onclick: () => { d.close(); openLineDialog(null, { ...e, id: undefined, receiptId: undefined, receiptIds: undefined, seq: undefined, created_at: undefined, perdiem: false, entered: false, enteredAt: '', reimbursement: undefined, recurringOccurrence: undefined, importKey: undefined, splitFrom: undefined }); } }, 'Add similar'),
+      isNew ? null : el('button', { onclick: () => {
+        const changedFields = signedAmount() !== Number(e.amount) || (personalSpace() && category.value !== categoryName) || cur.value !== e.currency || date.value !== e.date || written.value !== (e.written || '') || vendor.value !== (e.vendor || '') || costObj.value !== (e.costObject || '') || shortIn.value !== (e.shortName || '') || trip.value !== (e.tripId || '') || sheetSel.value !== e.sheetId || business !== !!e.business || receipt !== !!e.receipt || JSON.stringify(photos.map(p => p.id)) !== JSON.stringify(photoIdsOf(e));
+        if (changedFields) { status.textContent = 'Save your edits before opening more actions.'; return; }
+        d.close(); openExpenseTools(line);
+      } }, 'More actions'),
       el('button', { onclick: () => d.close() }, 'Cancel'),
       isNew ? null : confirmButton('Delete', async () => { await softDelete('expenses', e.id); d.close(); toast('Deleted'); await refresh(); scheduleSync(); }),
       status));
-  const d = openDialog(isNew ? 'New expense' : 'Edit expense', body);
+  const d = openDialog(personalSpace() ? (isNew ? 'Add spending' : 'Edit spending') : (isNew ? 'New expense' : 'Edit expense'), body);
   setBiz(business);
   setTimeout(() => amount.focus(), 50);
 }
@@ -695,19 +910,49 @@ export async function exportCsv() {
 
 // Full backup: settings (with the Clockify and Supabase keys) and every table.
 export async function backupJson() {
-  const all = { version: 2, exported: new Date().toISOString(), settings: loadSettings() };
-  for (const t of ['sheets', 'trips', 'expenses']) all[t] = await db.all(t);
-  download(`ifs-bridge-backup-${todayIso()}.json`, JSON.stringify(all, null, 1), 'application/json');
+  const all = await snapshot();
+  all.receipts = await db.all('receipts');
+  // JSON cannot store Blobs. Encode photos, including snapshots in undo history,
+  // so a downloaded backup does not silently lose them.
+  const encoded = await encodeBackupValue(all); assertScopeCurrent();
+  download(`ifs-bridge-${currentScope().workspace}-backup-${todayIso()}.json`, JSON.stringify(encoded, null, 1), 'application/json');
 }
 
 export async function restoreJson(text) {
   const obj = JSON.parse(text);
-  let n = 0;
-  for (const t of ['sheets', 'trips', 'expenses']) for (const r of obj[t] || []) { if (r && r.id) { await db.put(t, { ...r, dirty: true }); n++; } }
-  if (obj.settings && typeof obj.settings === 'object') { saveSettings(obj.settings); n++; }
+  assertBackupScope(obj); assertScopeCurrent();
+  const decoded = decodeBackupValue(obj);
+  let n = await restoreSnapshot(decoded);
+  for (const receipt of decoded.receipts || []) {
+    assertScopeCurrent();
+    if (!receipt?.id || !(receipt.blob instanceof Blob)) continue;
+    const current = await db.get('receipts', receipt.id); assertScopeCurrent();
+    if (current?.blob && Date.parse(current.updated_at || 0) > Date.parse(receipt.updated_at || 0)) continue;
+    await db.put('receipts', { ...receipt, dirty: true, pc: false, pcScope: '' }); n++;
+  }
   await refresh();
   scheduleSync();
   return n;
+}
+
+async function encodeBackupValue(value) {
+  if (value instanceof Blob) {
+    const bytes = new Uint8Array(await value.arrayBuffer()); let binary = '';
+    for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+    return { __ifsBlob: btoa(binary), type: value.type || 'application/octet-stream' };
+  }
+  if (Array.isArray(value)) return Promise.all(value.map(encodeBackupValue));
+  if (value && typeof value === 'object') { const pairs = await Promise.all(Object.entries(value).map(async ([key, v]) => [key, await encodeBackupValue(v)])); return Object.fromEntries(pairs); }
+  return value;
+}
+function decodeBackupValue(value) {
+  if (value && typeof value === 'object' && typeof value.__ifsBlob === 'string') {
+    const binary = atob(value.__ifsBlob), bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+    return new Blob([bytes], { type: typeof value.type === 'string' ? value.type : 'application/octet-stream' });
+  }
+  if (Array.isArray(value)) return value.map(decodeBackupValue);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, decodeBackupValue(v)]));
+  return value;
 }
 
 // ---------- helpers ----------

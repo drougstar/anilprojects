@@ -1,16 +1,32 @@
-// Network-first for the app shell, cache as fallback so the page opens offline.
-const CACHE = 'ifsbridge-v30';
-const SHELL = ['./', './index.html', './css/app.css', './js/app.js', './js/rules.js', './js/ifs.js', './js/clockify.js', './js/store.js', './js/dom.js', './js/db.js', './js/supabase.js', './js/sync.js', './js/expense-ifs.js', './js/expenses.js', './js/localbackup.js', './js/week-status.js', './js/ocr.js', './js/report.js', './manifest.webmanifest', './icons/icon-192.png'];
+// Only public app assets enter the offline cache. Backups and receipt APIs never do.
+const CACHE = 'ifsbridge-v36-test-1';
+const SHELL = ['./', './index.html', './css/app.css', './css/expense-tools.css', './js/app.js', './js/shell.js', './js/scope.js', './js/workspace-ui.js', './js/expense-tools.js', './js/expense-workflows.js', './js/rules.js', './js/ifs.js', './js/clockify.js', './js/store.js', './js/dom.js', './js/db.js', './js/supabase.js', './js/sync.js', './js/expense-ifs.js', './js/expenses.js', './js/localbackup.js', './js/week-status.js', './js/ocr.js', './js/report.js', './manifest.webmanifest', './icons/icon-192.png'];
+SHELL.push('./css/personal.css', './js/personal.js', './js/personal-analytics.js');
+SHELL.push('./css/auth.css', './css/bank-import.css', './css/personal-study.css', './js/bank-ui.js', './js/bank-import.js', './js/bank-files.js', './js/bank-reader-worker.js', './js/personal-study.js', './vendor/xlsx-0.20.3.full.min.js');
+SHELL.push('./js/site-config.js');
+const paths = new Set(SHELL.map(path => new URL(path, self.registration.scope).pathname));
+const ratePath = new URL('./rates/', self.registration.scope).pathname;
 
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });
-self.addEventListener('activate', e => {
-  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+self.addEventListener('activate', event => {
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('ifsbridge-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim()));
 });
-self.addEventListener('fetch', e => {
-  const url = new URL(e.request.url);
-  if (url.origin !== location.origin || e.request.method !== 'GET') return; // Clockify etc. go straight to the network
-  // Bypass the HTTP cache so an updated file is never shadowed by an old copy; the SW cache is the offline fallback.
-  e.respondWith(fetch(e.request.url, { cache: 'no-store', credentials: 'same-origin' }).then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; }).catch(() => caches.match(e.request)));
+self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+  if (url.origin !== location.origin || event.request.method !== 'GET') return;
+  const publicRate = url.pathname.startsWith(ratePath) && /^\d{4}-\d{2}-\d{2}\.json$/.test(url.pathname.slice(ratePath.length));
+  if (!paths.has(url.pathname) && !publicRate) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    try {
+      const response = await fetch(event.request, { cache: 'no-store' });
+      if (response.ok) await cache.put(event.request, response.clone());
+      return response;
+    } catch {
+      return await cache.match(event.request) || new Response('This app file is unavailable offline. Reconnect and reload.', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+    }
+  })());
 });
+

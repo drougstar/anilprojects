@@ -1,3 +1,5 @@
+import { currentScope, scopeIsCurrent } from './scope.js';
+import { attentionPanel } from './workspace-ui.js';
 // Overview tab: business vs personal vs per diem by month, by type, by trip; sheets and weeks status.
 import { live, db } from './db.js';
 import { totalsByCurrency, fmtMoney } from './expense-ifs.js';
@@ -6,6 +8,7 @@ import { Clockify } from './clockify.js';
 import { buildWeek, fetchWindow, mondayOf } from './rules.js';
 
 let ctx = null;
+let renderId = 0;
 const state = { month: '' };
 
 // ---------- working hours per month (Clockify, through the same rules as the Week tab) ----------
@@ -128,10 +131,12 @@ const money = ls => Object.entries(totalsByCurrency(ls)).map(([c, n]) => fmtMone
 const fmtWhen = iso => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 
 export async function render() {
+  const request = ++renderId;
   const root = $('#tab-overview');
   if (!root) return;
   const s = ctx.settings();
   const [sheets, trips, lines, weeks] = await Promise.all([live('sheets'), live('trips'), live('expenses'), live('weeks')]);
+  if (!scopeIsCurrent() || request !== renderId) return;
   const codeOf = code => (s.expenseCodes || []).find(c => String(c.code) === String(code));
   // months with expenses, plus the last six months so hours can be loaded for a month without expenses
   const now = new Date();
@@ -148,8 +153,28 @@ export async function render() {
     el('button', { type: 'button', class: 'chip' + (state.month === k ? ' on' : ''), onclick: () => { state.month = k; render(); } }, l)));
   root.append(el('div', { class: 'section-head' }, el('h3', {}, monthLabel(state.month)), el('button', { onclick: () => exportMonth(ls, sheets, trips, codeOf) }, 'Export CSV')), chips);
 
+  const attention = await attentionPanel();
+  if (!scopeIsCurrent() || request !== renderId) return;
+  if (attention) root.prepend(attention);
+  if (currentScope().workspace === 'personal') {
+    const refunds = ls.filter(line => Number(line.amount) < 0).map(line => ({ ...line, amount: -Number(line.amount) }));
+    root.append(el('div', { class: 'ov-cards' },
+      card('Net spending', money(ls), `${ls.length} entries · after refunds`),
+      card('Refunds', money(refunds), `${refunds.length} refunds`)));
+    const categories = new Map();
+    for (const line of ls) {
+      const category = line.category || codeOf(line.code)?.short || 'Uncategorized';
+      if (!categories.has(category)) categories.set(category, []);
+      categories.get(category).push(line);
+    }
+    root.append(section('By category', categories.size ? table(['Category', 'Net spending', 'Entries'],
+      [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([category, records]) => [category, money(records), String(records.length)])) :
+      el('p', { class: 'empty' }, 'No spending in this period. Add an expense or import a CSV from Expenses.')));
+    return;
+  }
   // working hours and pay estimate (Clockify), then the expense summary
   await renderHours(root, state.month, months);
+  if (!scopeIsCurrent() || request !== renderId) return;
 
   // summary cards
   root.append(el('div', { class: 'ov-cards' },
@@ -163,23 +188,27 @@ export async function render() {
   for (const l of ls) { const k = codeOf(l.code)?.short || String(l.code); if (!byType.has(k)) byType.set(k, { biz: [], pers: [] }); byType.get(k)[l.business ? 'biz' : 'pers'].push(l); }
   root.append(section('By type', table(['Type', 'Business', 'Personal', 'Lines'], [...byType.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => [k, money(v.biz), money(v.pers), String(v.biz.length + v.pers.length)]))));
 
+  // Use the same dated lines as the cards and CSV, including for trips or sheets spanning months.
+  const periodLabel = state.month ? ` · ${monthLabel(state.month)}` : '';
+  if (state.month) root.append(el('p', { class: 'help' }, 'Trip and sheet amounts and open-line counts use expenses dated in this month. Trip dates and sheet status describe the whole trip or sheet.'));
+
   // trips (those with lines in the month, or all when no month chosen)
-  const tripRows = trips.filter(t => !state.month || lines.some(l => l.tripId === t.id && monthOf(l.date) === state.month)).map(t => {
-    const tl = lines.filter(l => l.tripId === t.id);
+  const tripRows = trips.filter(t => !state.month || ls.some(l => l.tripId === t.id)).map(t => {
+    const tl = ls.filter(l => l.tripId === t.id);
     const income = tl.filter(l => l.perdiem), pocket = tl.filter(l => !l.perdiem && !l.business), reimb = tl.filter(l => !l.perdiem && l.business);
     const net = {};
     for (const l of income) net[l.currency] = (net[l.currency] || 0) + Number(l.amount);
     for (const l of pocket) net[l.currency] = (net[l.currency] || 0) - Number(l.amount);
     return [t.name, `${t.start} → ${t.end} (${t.days} d)`, money(income), money(pocket), money(reimb), Object.entries(net).map(([c, n]) => fmtMoney(Math.round(n * 100) / 100, c)).join(' + ') || '—'];
   });
-  root.append(section('Trips', tripRows.length ? table(['Trip', 'Dates', 'Per diem', 'Out of pocket', 'Reimbursed', 'Net'], tripRows) : el('p', { class: 'empty' }, 'No trips in this period.')));
+  root.append(section('Trips' + periodLabel, tripRows.length ? table(['Trip', 'Full trip dates', 'Per diem', 'Out of pocket', 'Reimbursed', 'Net'], tripRows) : el('p', { class: 'empty' }, 'No trips in this period.')));
 
   // sheets
-  const sheetRows = sheets.filter(sh => !state.month || lines.some(l => l.sheetId === sh.id && monthOf(l.date) === state.month)).map(sh => {
-    const sl = lines.filter(l => l.sheetId === sh.id && l.business);
+  const sheetRows = sheets.filter(sh => !state.month || ls.some(l => l.sheetId === sh.id)).map(sh => {
+    const sl = ls.filter(l => l.sheetId === sh.id && l.business);
     return [sh.title, sh.expenseId || '—', sh.shortName || '—', money(sl), sh.status + (sh.enteredAt ? ` · ${fmtWhen(sh.enteredAt)}` : ''), `${sl.filter(l => !l.entered).length} not in IFS`];
   });
-  root.append(section('Expense sheets', sheetRows.length ? table(['Sheet', 'IFS ID', 'Project', 'To IFS', 'Status', 'Open'], sheetRows) : el('p', { class: 'empty' }, 'No sheets in this period.')));
+  root.append(section('Expense sheets' + periodLabel, sheetRows.length ? table(['Sheet', 'IFS ID', 'Project', 'To IFS', 'Sheet status', 'Open lines'], sheetRows) : el('p', { class: 'empty' }, 'No sheets in this period.')));
 
   // weeks
   const weekRows = weeks.filter(w => !state.month || monthOf(w.monday) === state.month).sort((a, b) => (b.monday || '').localeCompare(a.monday || '')).map(w => [w.monday, `${w.total} h`, `entered ${fmtWhen(w.enteredAt)}`]);
@@ -201,3 +230,4 @@ function exportMonth(ls, sheets, trips, codeOf) {
   }
   download(`overview-${state.month || 'all'}.csv`, '﻿' + rows.map(r => r.map(esc).join(';')).join('\r\n'), 'text/csv');
 }
+

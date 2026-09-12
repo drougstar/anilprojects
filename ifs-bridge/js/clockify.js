@@ -1,16 +1,21 @@
 // Minimal Clockify REST client (api.clockify.me, CORS is open, key in X-Api-Key).
+import { assertScopeCurrent } from './scope.js';
 const BASE = 'https://api.clockify.me/api/v1';
 
 export class Clockify {
   constructor(apiKey) { this.apiKey = apiKey; }
 
   async request(method, path, { params = {}, body } = {}) {
+    assertScopeCurrent();
     const url = new URL(BASE + path);
     for (const [k, v] of Object.entries(params)) if (v != null) url.searchParams.set(k, v);
     const res = await fetch(url, { method, headers: { 'X-Api-Key': this.apiKey, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    assertScopeCurrent();
     if (res.status === 401 || res.status === 403) throw new Error('Clockify rejected the API key. Check it in Settings.');
-    if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`Clockify ${res.status} on ${method} ${path}${t ? ': ' + t.slice(0, 160) : ''}`); }
-    return res.status === 204 ? null : res.json();
+    if (!res.ok) { const t = await res.text().catch(() => ''); assertScopeCurrent(); throw new Error(`Clockify ${res.status} on ${method} ${path}${t ? ': ' + t.slice(0, 160) : ''}`); }
+    const result = res.status === 204 ? null : await res.json();
+    assertScopeCurrent();
+    return result;
   }
 
   get(path, params = {}) { return this.request('GET', path, { params }); }

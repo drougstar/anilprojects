@@ -1,3 +1,4 @@
+import { currentScope, scopedKey, getConnection, assertScopeCurrent } from './scope.js';
 // Settings and mapping. localStorage now; the same shape moves to Supabase in phase 2.
 const KEY = 'ifsbridge.settings.v1';
 
@@ -12,9 +13,9 @@ $RECORD=!
 -$2:LINKED_REPORT_CODE=
 -$3:PROJECT_TRANSACTION_API.HAS_LINKED_TRANS_IN_WEEK( COMPANY_ID, EMP_NO, ACTIVITY_SEQ, REPORT_COST_CODE, ACCOUNT_DATE)=0
 -$4:COST_ACCOUNTING=
--$5:RESOURCE_SEQ=133
--$6:RESOURCE_ID=10084
--$7:RESOURCE_API.GET_DESCRIPTION(RESOURCE_SEQ)=ANIL SAĞIN
+-$5:RESOURCE_SEQ=
+-$6:RESOURCE_ID=
+-$7:RESOURCE_API.GET_DESCRIPTION(RESOURCE_SEQ)=
 -$8:MON_INTERNAL_QUANTITY=
 -$9:TUE_INTERNAL_QUANTITY=
 -$10:WED_INTERNAL_QUANTITY=
@@ -25,8 +26,8 @@ $RECORD=!
 -$15:=
 -$16:PURCHASE_ORDER_NO=
 -$17:PURCHASE_ORDER_LINE_REF=
--$18:COMPANY_ID=QPTR
--$19:EMP_NO=10084
+-$18:COMPANY_ID=
+-$19:EMP_NO=
 -$20:ACCOUNT_DATE=
 -$21:REPORT_COST_TYPE=Zaman
 -$22:SHORT_NAME=
@@ -48,8 +49,8 @@ $LU=ExpenseDetail
 $VIEW=DETAIL_EXPENSE
 $RECORD=!
 -$0:C_SHORT_NAME=
--$1:COMPANY_ID=QPTR
--$3:EXPENSE_RULE=02
+-$1:COMPANY_ID=
+-$3:EXPENSE_RULE=
 -$4:CONV_FACTOR=1
 -$5:=2
 -$6:=FALSE
@@ -67,7 +68,7 @@ $RECORD=!
 -$17:VAT_PAY_AMOUNT=0
 -$18:AREA=
 -$19:SHORT_NAME=
--$24:ORG_CODE=222
+-$24:ORG_CODE=
 -$25:CREDIT_CARD_TRANS=FALSE
 -$38:SEQ_NO=
 -$42:PAYMENT_DATE=
@@ -89,13 +90,13 @@ export const DEFAULTS = {
   travelKeyword: 'travel',  // description starting with this word also counts as travel
   codes: { regular: 'F_03', ot15: 'F_02', ot2: 'F_10', travel: 'F_12', travelRegular: 'F_01' },
   codeDescriptions: { F_03: 'Regular Time (Normal Calisma)', F_02: 'Over Time (OT) x 1.5', F_10: 'Over Time (OT) x 2', F_12: 'Travel Over Time (ST) x 1', F_01: 'Travel  Regular Time', F_11: 'Over Time (ST) x 1' },
-  identity: { companyId: 'QPTR', empNo: '10084', resourceId: '10084', resourceSeq: '133', resourceName: 'ANIL SAĞIN' },
+  identity: { companyId: '', empNo: '', resourceId: '', resourceSeq: '', resourceName: '' },
   template: DEFAULT_TEMPLATE,
   // ---- expenses (phase 2) ----
   supabase: { url: '', anonKey: '' },
   defaultCurrency: 'TRY',
   currencies: ['TRY', 'USD', 'EUR', 'GBP', 'CHF', 'PLN', 'SEK', 'AUD', 'JPY'],
-  costObjects: ['/Personal 1', '/16 QP 16'],
+  costObjects: [],
   expenseCodes: [
     { code: 3351, desc: 'Harcırah (Per-Diem)', short: 'Per diem' },
     { code: 3352, desc: 'Bonus', short: 'Bonus' },
@@ -123,9 +124,9 @@ export const DEFAULTS = {
   perDiemCode: 3351,
   expenseTemplate: DEFAULT_EXPENSE_TEMPLATE,
   // Project short name for expense lines = PROJECT.SUBPROJECT.ACTIVITY of the project's expense activity.
-  // Seen so far: 210595.0105.0105-A and 210701.0105.0105-A, so the suffix is suggested for every mapped project.
-  expenseActivitySuffix: '0105.0105-A',
-  knownShortNames: ['210701.0105.0105-A'],
+  // Set the expense activity suffix and project names in your own Settings.
+  expenseActivitySuffix: '',
+  knownShortNames: [],
   homeCurrency: 'TRY',      // lines in this currency get CURR_RATE=1
   rateSource: 'tcmb',       // tcmb = rate for the line's date from the Central Bank via the PC server | manual = the sheet's typed rate
   tcmbField: 'ForexBuying', // which TCMB column IFS uses: ForexBuying (döviz alış), ForexSelling, BanknoteBuying, BanknoteSelling
@@ -136,44 +137,57 @@ export const DEFAULTS = {
   restDaysPaid: true,       // Sundays and public holidays count as paid rest days in the pay estimate
   restDayHours: 7.5,        // 45 h / 6 days
   payMinDay: 9,             // a worked weekday counts as at least this many regular hours for pay (8 h US days get +1)
-  mapping: [
-    { clockifyProjectId: '6a05ef24b89e127bf04311a6', clockifyProjectName: 'General', kind: 'general', regularHours: '',
-      projectId: '202026', projectName: 'GENEL PROJE - 2026', subProjectId: '01', subProjectDesc: 'DEVAM EDEN FAALIYETLER',
-      activityNo: '01-C', activitySeq: '100063589', activityDesc: 'PROJE ZAMAN KAYITLARI_TIMESHEET', shortName: '202026.01.01-C' },
-    { clockifyProjectId: '6a0589dd06c65aaf600572ee', clockifyProjectName: '210603 - Packaging', kind: 'project', regularHours: '',
-      projectId: '210603', projectName: 'QP SIKA Sealy Plant M63 PVC', subProjectId: '01000', subProjectDesc: '000-GENERAL',
-      activityNo: '01000-J', activitySeq: '', activityDesc: 'Offline Programming', shortName: '210603.01000.01000-J' },
-    { clockifyProjectId: '6a8edcab54871ee272dbe980', clockifyProjectName: '210701 - Amrize Support', kind: 'project', regularHours: 8,
-      projectId: '210701', projectName: 'QP_Amr_Wellf-SC L3 Wind&Pack Li Sup', subProjectId: '010101', subProjectDesc: 'ENGINEERING LABOR',
-      activityNo: '010101-B', activitySeq: '100069789', activityDesc: 'PLC', shortName: '210701.010101.010101-B',
-      travel: { activityNo: '010101-I', activitySeq: '100069796', activityDesc: 'TRAVEL', shortName: '210701.010101.010101-I' } },
-    { clockifyProjectId: '6a2a51cb757e59fda5f5eb53', clockifyProjectName: 'Personal Project', kind: 'ignore' },
-  ],
+  mapping: [],
 };
 
+// Public defaults contain no employee or project details.
+// New accounts and Personal start with no inherited identity, Clockify key or mapping.
+export function defaultsForScope() {
+  const defaults = structuredClone(DEFAULTS);
+  defaults.supabase = getConnection();
+  if (!currentScope().legacy) {
+    defaults.identity = Object.fromEntries(Object.keys(defaults.identity).map(key => [key, '']));
+    defaults.mapping = [];
+    defaults.knownShortNames = [];
+    defaults.costObjects = [];
+    const clearIdentity = text => text.replace(/^(-\$\d+:(?:COMPANY_ID|EMP_NO|RESOURCE_SEQ|RESOURCE_ID|RESOURCE_API\.GET_DESCRIPTION\(RESOURCE_SEQ\)|ORG_CODE)=).*$/gm, '$1');
+    defaults.template = clearIdentity(defaults.template);
+    defaults.expenseTemplate = clearIdentity(defaults.expenseTemplate);
+  }
+  if (currentScope().workspace === 'personal') {
+    defaults.currencies = [...new Set([...defaults.currencies, 'CAD'])];
+    // Numeric IDs keep existing expense/import storage compatible; these are private categories.
+    defaults.expenseCodes = ['Groceries', 'Food & drink', 'Transport', 'Home', 'Health', 'Shopping', 'Subscriptions', 'Travel', 'Other', 'Family']
+      .map((name, index) => ({ code: 90001 + index, desc: name, short: name }));
+  }
+  return defaults;
+}
+
 export function loadSettings() {
+  assertScopeCurrent();
+  const defaults = defaultsForScope();
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return structuredClone(DEFAULTS);
+    const raw = localStorage.getItem(scopedKey(KEY));
+    if (!raw) return defaults;
     const s = JSON.parse(raw);
     const merged = {
-      ...structuredClone(DEFAULTS), ...s,
+      ...defaults, ...s,
       clockify: { ...DEFAULTS.clockify, ...(s.clockify || {}) },
-      supabase: { ...DEFAULTS.supabase, ...(s.supabase || {}) },
+      supabase: getConnection(),
       tags: { ...DEFAULTS.tags, ...(s.tags || {}) },
       codes: { ...DEFAULTS.codes, ...(s.codes || {}) },
       codeDescriptions: { ...DEFAULTS.codeDescriptions, ...(s.codeDescriptions || {}) },
-      identity: { ...DEFAULTS.identity, ...(s.identity || {}) },
+      identity: { ...defaults.identity, ...(s.identity || {}) },
       holidays: Array.isArray(s.holidays) ? s.holidays : [],
-      mapping: mergeMapping(s.mapping || []),
+      mapping: currentScope().legacy ? mergeMapping(s.mapping || []) : (Array.isArray(s.mapping) ? s.mapping : []),
     };
     // Lists that newer versions may extend: keep the user's entries, add unknown defaults.
-    merged.expenseCodes = mergeById(DEFAULTS.expenseCodes, s.expenseCodes, 'code');
-    merged.currencies = [...new Set([...(s.currencies || []), ...DEFAULTS.currencies])];
-    merged.costObjects = [...new Set([...(s.costObjects || []), ...DEFAULTS.costObjects])];
-    merged.knownShortNames = [...new Set([...(s.knownShortNames || []), ...DEFAULTS.knownShortNames])];
+    merged.expenseCodes = mergeById(defaults.expenseCodes, s.expenseCodes, 'code');
+    merged.currencies = [...new Set([...(s.currencies || []), ...defaults.currencies])];
+    merged.costObjects = [...new Set([...(s.costObjects || []), ...defaults.costObjects])];
+    merged.knownShortNames = [...new Set([...(s.knownShortNames || []), ...defaults.knownShortNames])];
     return merged;
-  } catch { return structuredClone(DEFAULTS); }
+  } catch { return defaults; }
 }
 
 // Keep saved mapping rows, fill blanks from the built-in defaults, add rows the user does not have yet.
@@ -207,7 +221,10 @@ export function normalizeMapping(mapping) {
 }
 
 export function saveSettings(s) {
+  assertScopeCurrent();
   normalizeMapping(s.mapping || []);
-  try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* private mode etc. */ }
+  try { localStorage.setItem(scopedKey(KEY), JSON.stringify({ ...s, supabase: getConnection() })); } catch { /* private mode etc. */ }
   document.dispatchEvent(new CustomEvent('ifsbridge:changed', { detail: { store: 'settings' } }));
 }
+
+

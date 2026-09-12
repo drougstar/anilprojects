@@ -1,0 +1,13 @@
+.workflow-menu,.workflow-list{display:grid;gap:10px;margin:12px 0}
+.workflow-menu-item{display:block;width:100%;text-align:left;white-space:normal;padding:12px 14px}
+.workflow-menu-item b,.workflow-menu-item small{display:block}.workflow-menu-item small{font-size:12px;color:var(--muted);font-weight:400;margin-top:4px}
+.workflow-item{padding:12px;border:1px solid var(--rule);border-radius:10px}.workflow-item .actions{margin-top:8px}
+.workflow-split-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;border:1px solid var(--rule);padding:12px;border-radius:10px}.workflow-split-row .field{margin:0}
+.workflow-receipt{display:block;max-width:100%;max-height:240px;margin:0 auto 12px;object-fit:contain;border-radius:8px}
+.workflow-ocr{max-height:180px;overflow:auto;white-space:pre-wrap;font-size:12px}
+.workflow-csv-preview{max-height:340px;overflow:auto}.workflow-csv-preview table{min-width:620px}.workflow-status{white-space:normal;overflow-wrap:anywhere}
+.workflow-external{display:inline-block;padding:8px 0}.workflow-menu-item progress{display:block;width:100%;height:8px;margin-top:8px;accent-color:var(--accent)}
+.pill.reimbursement{font-size:10px}.attention-filter{display:flex;align-items:center;gap:8px;padding:8px 0;font-size:12px}
+.reimbursement-row{display:flex;align-items:center;gap:8px}.reimbursement-row .workflow-menu-item{min-width:0;flex:1}.reimbursement-row input[type=checkbox],.reimbursement-select-all input{width:20px;height:20px;flex:0 0 20px;accent-color:var(--accent)}
+.reimbursement-select-all{display:flex;align-items:center;gap:8px;font-size:13px;min-height:32px}.reimbursement-save{position:sticky;bottom:0;padding:12px 0 0;background:var(--surface);border-top:1px solid var(--rule);display:grid;gap:8px}.reimbursement-save .help{margin:0}.reimbursement-save>.primary{justify-self:start}.reimbursement-save details,.reimbursement-quick details{font-size:13px}.reimbursement-save summary,.reimbursement-quick summary{cursor:pointer;min-height:28px}.reimbursement-save details[open],.reimbursement-quick details[open]{padding-bottom:8px}.reimbursement-quick{display:grid;gap:8px}.reimbursement-quick>.primary{justify-self:start}
+@media(max-width:540px){.workflow-split-row{grid-template-columns:1fr}.workflow-menu-item{padding:11px}.workflow-csv-preview{max-height:280px}}

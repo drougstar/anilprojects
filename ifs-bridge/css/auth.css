@@ -1,0 +1,12 @@
+/* Default-deny layout also covers late callbacks and a restored browser page. */
+html[data-auth="locked"] body > :not(#auth-screen):not(noscript) { display: none !important; }
+.auth-screen { min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; }
+.auth-screen[hidden] { display: none; }
+.auth-card { width: 100%; max-width: 430px; }
+.auth-card h1 { font-size: 26px; margin: 0 0 8px; }
+.auth-card .account-panel { margin-top: 24px; }
+.auth-card .account-panel > .field { margin: 14px 0; }
+.auth-card .row { flex-wrap: wrap; }
+.auth-card .more-opts { margin-top: 24px; }
+.auth-card input { width: 100%; font-size: 16px; }
+.auth-message { padding: 12px; border: 1px solid var(--line, #ccc); border-radius: 8px; }
