@@ -40,13 +40,17 @@ export function openDialog(title, body, { onClose, wide = false } = {}) {
     const box = d.getBoundingClientRect();
     if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) d.close();
   });
-  d.addEventListener('close', () => { d.remove(); onClose && onClose(); });
+  d.addEventListener('close', () => {
+    document.dispatchEvent(new CustomEvent('ifsbridge:dialog-closed', { detail: { dialog: d } }));
+    d.remove(); onClose && onClose();
+  });
   // A late callback must not create an invisible modal over the sign-in form.
   if (document.documentElement.dataset.auth === 'locked') {
     d.replaceChildren(); onClose?.(); return d;
   }
   document.body.append(d);
   d.showModal();
+  document.dispatchEvent(new CustomEvent('ifsbridge:dialog-opened', { detail: { dialog: d } }));
   return d;
 }
 

@@ -1,4 +1,5 @@
 import { createAccountPreferences } from './account-preferences.js';
+import { createAppNavigation } from './app-navigation.js';
 import { renderSickBenefitTool } from './sick-benefit.js';
 import { openLeaveEntryDialog } from './leave-entry.js';
 import { currentScope, scopedKey, scopeIsCurrent, assertScopeCurrent } from './scope.js';
@@ -15,11 +16,12 @@ import { initLocalBackup, backupAvailable, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
 import { allWeeks, weekRecord, markWeekEntered, unmarkWeek, diffRows, recentMondays, shiftIso } from './week-status.js';
 import { initReport, render as renderOverview } from './report.js';
-import { initPersonal, renderPersonal, reviewPersonal } from './personal.js';
+import { initPersonal, renderPersonal, reviewPersonal, capturePersonalView, restorePersonalView } from './personal.js';
 import { initShell, updateShell } from './shell.js';
 
 let settings = scopeIsCurrent() ? loadSettings() : null;
 let accountPreferences = null;
+let appNavigation = null;
 let week = null;          // result of buildWeek
 let exportText = '';
 let weekLoadId = 0;       // Only the newest request may update the selected week.
@@ -60,7 +62,7 @@ function currentTheme() { try { return localStorage.getItem('ifsbridge.theme') |
 const fmtH = h => (h === 0 ? '' : (Math.round(h * 100) / 100).toString());
 
 // ---------- tabs ----------
-function showTab(name) {
+function showTab(name, { history = true } = {}) {
   // Ignore a stale saved tab name instead of hiding every screen.
   if (!['week', 'expenses', 'overview', 'study', 'settings'].includes(name)) name = 'week';
   const personal = currentScope().workspace === 'personal';
@@ -72,11 +74,12 @@ function showTab(name) {
   for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('active', b.dataset.tab === name);
   for (const s of document.querySelectorAll('.tab')) s.hidden = s.id !== `tab-${name}`;
   try { localStorage.setItem(scopedKey('ifsbridge.tab'), name); } catch {}
+  let rendered;
   if (name === 'settings') renderSettings();
-  if (name === 'expenses') { personal ? renderPersonal($('#tab-expenses'), 'transactions') : renderExpenses(); scheduleSync(500); }
-  if (name === 'overview') { personal ? renderPersonal($('#tab-overview'), 'overview') : renderOverview(); if (personal) scheduleSync(500); }
-  if (name === 'study' && personal) { renderPersonal($('#tab-study'), 'study'); scheduleSync(500); }
-  if (name === 'week' && !week && settings.clockify.apiKey) loadWeek();   // no need to press Load the first time
+  if (name === 'expenses') { rendered = personal ? renderPersonal($('#tab-expenses'), 'transactions') : renderExpenses(); scheduleSync(500); }
+  if (name === 'overview') { rendered = personal ? renderPersonal($('#tab-overview'), 'overview') : renderOverview(); if (personal) scheduleSync(500); }
+  if (name === 'study' && personal) { rendered = renderPersonal($('#tab-study'), 'study'); scheduleSync(500); }
+  if (name === 'week' && !week && settings.clockify.apiKey) rendered = loadWeek();   // no need to press Load the first time
   if (name === 'week' && !settings.clockify.apiKey) {
     $('#week-result').replaceChildren(el('div', { class: 'empty expense-empty' },
       el('h3', {}, 'Bring your week into focus'),
@@ -85,6 +88,13 @@ function showTab(name) {
         el('button', { class: 'primary', onclick: () => openSettings('connections') }, 'Connect Clockify'),
         el('button', { onclick: () => showTab('expenses') }, 'Open expenses'))));
   }
+  if (history) appNavigation?.record();
+  return rendered;
+}
+
+function captureAppView() {
+  return { tab: document.querySelector('.tabs button.active')?.dataset.tab || 'overview',
+    personal: currentScope().workspace === 'personal' ? capturePersonalView() : null };
 }
 
 // ---------- week ----------
@@ -554,13 +564,14 @@ function openSettings(group = 'time', focus) {
 // ---------- boot ----------
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
-  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settingsPage?.dispose(); settingsPage = null; accountPreferences?.dispose(); accountPreferences = null; settings = null; } });
+  const admitted = await initAuthGate({ onLock: () => { appNavigation?.dispose(); appNavigation = null; invalidateClockifyView(); ++clockifyConnectId; settingsPage?.dispose(); settingsPage = null; accountPreferences?.dispose(); accountPreferences = null; settings = null; } });
   if (!admitted) return;
   settings = loadSettings();
   const navigation = document.querySelector('.top');
   navigation.inert = true;
   const main = document.querySelector('#main-content');
   main.inert = true;
+  let revealed = false;
   try {
   accountPreferences = createAccountPreferences({ workspace: currentScope().workspace, getSaved: loadSettings,
     saveLocal: next => saveSettings(next, { strict: true }), isCurrent: scopeIsCurrent, hasDraft: () => !!settingsPage?.dirty,
@@ -583,7 +594,8 @@ async function boot() {
   document.querySelector('.tabs button[data-tab="study"]').hidden = !personal;
   initExpenses({ settings: () => settings, saveSettings: async s => { const result = await accountPreferences.save(s); assertScopeCurrent(); settings = result.settings; if (result.state !== 'synced') throw Error(result.message); return result; }, scope: currentScope, el, $, openSettings });
   initReport({ settings: () => settings, saveSettings: s => saveSettings(s), openSettings });
-  initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view), openWorkExpense: openWorkExpenseFromPersonal });
+  initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view), openWorkExpense: openWorkExpenseFromPersonal,
+    onViewChange: () => appNavigation?.record() });
   $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
   $('#btn-bulk').addEventListener('click', openBulkDialog);
   if (!personal && settings.clockify.apiKey) renderWeekStrip();
@@ -598,13 +610,23 @@ async function boot() {
   $('#week-monday').addEventListener('change', loadWeek);
   let tab = personal ? 'overview' : 'week';
   try { tab = localStorage.getItem(scopedKey('ifsbridge.tab')) || tab; } catch {}
-  showTab(tab);
+  showTab(tab, { history: false });
+  revealPrivateApp(); revealed = true;
+  // Back/Forward moves inside this admitted document. It never restores an
+  // authenticated visit from browser storage or bypasses the sign-in gate.
+  appNavigation = createAppNavigation({ capture: captureAppView, isCurrent: scopeIsCurrent,
+    restore: async (snapshot, traversal) => {
+      if (!scopeIsCurrent() || (traversal && !traversal.isCurrent()) || !snapshot || typeof snapshot !== 'object' ||
+          !['week', 'expenses', 'overview', 'study', 'settings'].includes(snapshot.tab)) return;
+      if (personal && snapshot.personal) restorePersonalView(snapshot.personal);
+      await showTab(snapshot.tab, { history: false });
+    } });
   const workExpense = personal ? null : takeWorkExpenseRequest();
   if (workExpense) { showTab('expenses'); await openExpense(workExpense); }
   } catch (error) {
     if (!scopeIsCurrent()) return;
     $('#main-content').replaceChildren(el('div', { class: 'empty' }, el('h3', {}, 'Could not open this space'), el('p', {}, error.message), el('button', { onclick: () => location.reload() }, 'Reload')));
-  } finally { if (scopeIsCurrent()) revealPrivateApp(); }
+  } finally { if (!revealed && scopeIsCurrent()) revealPrivateApp(); }
 }
 boot();
 

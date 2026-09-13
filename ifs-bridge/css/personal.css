@@ -75,6 +75,9 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
 .personal-filter-panel{padding:10px 12px;background:var(--surface);border:1px solid var(--rule);border-radius:9px}
 .personal-filter-panel>summary{font-size:13px;font-weight:600;cursor:pointer}
 .personal-shared-filters{margin-bottom:16px}
+.personal-filter-controls{position:relative}
+.personal-filter-controls>.link{position:absolute;right:10px;top:4px;min-height:32px;font-size:12px}
+.personal-filter-controls .personal-filter-panel>summary{padding-right:110px;min-height:24px;line-height:24px}
 .personal-filter-state>span{flex:1 1 100%}
 .account-security-status{border-left:3px solid var(--accent);padding:4px 12px;margin:14px 0}
 .account-security-status p{margin:4px 0}
