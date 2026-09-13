@@ -580,7 +580,7 @@ async function boot() {
   });
   const personal = currentScope().workspace === 'personal';
   document.querySelector('.tabs button[data-tab="week"]').hidden = personal;
-  document.querySelector('.tabs button[data-tab="study"]').hidden = !personal;
+  document.querySelector('.tabs button[data-tab="study"]').hidden = true;
   initExpenses({ settings: () => settings, saveSettings: async s => { const result = await accountPreferences.save(s); assertScopeCurrent(); settings = result.settings; if (result.state !== 'synced') throw Error(result.message); return result; }, scope: currentScope, el, $, openSettings });
   initReport({ settings: () => settings, saveSettings: s => saveSettings(s), openSettings });
   initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view) });

@@ -94,4 +94,26 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
 .personal-metric strong{white-space:nowrap;overflow-x:auto;max-width:100%;overflow-wrap:normal}
 @media(max-width:760px){.personal-metric strong{font-size:clamp(15px,4.3vw,21px)}.personal-metric.primary-metric strong{font-size:29px}}
 .personal-toolbar-actions{flex-wrap:wrap}.personal-toolbar-actions>button{white-space:nowrap;flex-shrink:0}
-@media(max-width:760px){.personal-toolbar-actions>.primary{flex:0 0 auto}}
+.personal-main-total{grid-template-columns:1fr;margin:0 0 12px}
+.personal-main-total .personal-metric{padding:20px 22px}
+.personal-main-total .personal-metric strong{font-size:34px}
+.personal-secondary-metrics{grid-template-columns:1fr 1fr}
+.personal-more{position:relative}
+.personal-more>summary{cursor:pointer;list-style:none;border:1px solid var(--rule);border-radius:8px;padding:10px 14px;min-height:40px}
+.personal-more>summary::-webkit-details-marker{display:none}
+.personal-more>summary::after{content:' ▾';font-size:11px}
+.personal-more-actions{position:absolute;right:0;top:calc(100% + 6px);z-index:20;display:flex;flex-direction:column;min-width:238px;max-width:calc(100vw - 48px);padding:6px;background:var(--surface);border:1px solid var(--rule);border-radius:10px;box-shadow:0 8px 26px #0002}
+.personal-more-actions>button{text-align:left;border:0;background:transparent;padding:10px 12px;white-space:normal;min-height:42px}
+.personal-more-actions>button:hover{background:var(--surface-2)}
+.personal-connection{padding:9px 12px;color:var(--ink-3);font-size:12px;border-top:1px solid var(--rule)}
+.personal-extra-details{border-top:1px solid var(--rule);padding:12px 0;margin-top:2px}
+.personal-extra-details>summary,.personal-filter-panel>summary{cursor:pointer;font-size:13px;color:var(--ink-2)}
+.personal-extra-content{padding-top:14px}
+.personal-status[hidden],.personal-filter-state[hidden]{display:none}
+body[data-workspace="personal"] .tabs button[aria-current="page"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+@media(max-width:760px){
+  .personal-toolbar-actions{justify-content:flex-end;width:100%}.personal-toolbar-actions>.primary{flex:0 0 auto}
+  .personal-main-total{grid-template-columns:1fr}.personal-main-total .personal-metric strong{font-size:32px}
+  .personal-secondary-metrics{grid-template-columns:1fr 1fr}
+  body[data-workspace="personal"] .tabs{grid-template-columns:repeat(3,minmax(0,1fr))}
+}

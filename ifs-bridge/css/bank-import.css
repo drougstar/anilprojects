@@ -6,6 +6,16 @@
 .bank-card-mapping summary { cursor: pointer; padding: 8px 0; font-weight: 600; }
 .bank-import-summary { display: grid; gap: 5px; }
 .bank-import-summary p { margin: 0; font-weight: 600; }
+.bank-import-summary small:empty { display: none; }
+.bank-import-review,.bank-import-options { border-top: 1px solid var(--rule); padding-top: 10px; }
+.bank-import-review > summary,.bank-import-options > summary { padding: 5px 0; font-weight: 600; }
+.bank-import-options[open] > :not(summary) { margin-top: 14px; }
+.bank-import-notes { display: grid; gap: 5px; color: var(--ink-3); }
+.bank-transaction-details { margin-left: 34px; min-width: 0; }
+.bank-transaction-details > summary { color: var(--ink-3); padding: 3px 0; font-size: 13px; }
+.bank-transaction-details[open] > :not(summary) { margin-top: 8px; }
+.bank-transaction-details .bank-review-fields { margin-left: 0; }
+.bank-transaction-details .bank-provenance { display: block; }
 .bank-preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0; }
 .bank-preview-controls small { color: var(--ink-3); flex: 1; min-width: 180px; }
 .bank-preview-row { border-top: 1px solid var(--rule); padding: 13px 0; display: grid; gap: 5px; }
@@ -18,12 +28,15 @@
 .bank-provenance { overflow-wrap: anywhere; font-size: 11px; }
 .bank-import-save { position: sticky; bottom: -1px; z-index: 2; background: var(--surface); padding: 12px 0 4px; border-top: 1px solid var(--rule); }
 .bank-import-save .help { margin: 8px 0 0; }
+.bank-import-save .help:empty { display: none; }
 .bank-original { display: grid; gap: 6px; overflow-wrap: anywhere; }
 .bank-original p { margin: 0; }
 @media(max-width:600px) {
   .bank-preview-main { grid-template-columns: 22px minmax(0,1fr); }
   .bank-preview-main .amt { grid-column: 2; justify-self: start; }
   .bank-review-fields { margin-left: 32px; grid-template-columns: minmax(0,1fr); gap: 8px; }
+  .bank-transaction-details { margin-left: 32px; }
+  .bank-import input[type=file] { max-width: 100%; }
   .bank-import-save button { width: 100%; }
 }
 

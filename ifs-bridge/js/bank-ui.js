@@ -36,22 +36,26 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   const aborter = new AbortController();
   let workbooks = [], parsed = [], plan = [], selected = new Set(), edited = new Map(), aliases = {}, existing = [], busy = false, valid = false, page = 1;
   const status = el('p', { class: 'help', role: 'status' });
-  const mappingHost = el('div'), preview = el('div'), sources = el('div', { class: 'bank-source-list' });
+  const mappingHost = el('div'), preview = el('div'), sources = el('div', { class: 'bank-source-list' }), warnings = el('div', { class: 'bank-import-notes' });
   const files = el('input', { type: 'file', accept: '.xls,.xlsx', multiple: true, 'aria-label': 'Bank Excel files' });
   const keepReferences = el('input', { type: 'checkbox', checked: true });
   const view = pick([['new', 'Ready to import'], ['possible-match', 'Needs duplicate review'], ['enrichment', 'New workbook details'], ['duplicate', 'Duplicates'], ['excluded', 'Excluded'], ['error', 'Errors'], ['all', 'All source rows']], 'new', 'Import review filter');
-  const saveButton = el('button', { type: 'button', class: 'primary', disabled: true }, 'Save reviewed transactions');
+  const saveButton = el('button', { type: 'button', class: 'primary', disabled: true }, 'Import');
   const summary = el('div', { class: 'bank-import-summary' });
+  const bulkPurpose = pick([['', 'Leave unchanged'], ...purposes], '', 'Purpose for selected purchases');
+  const review = el('details', { class: 'bank-import-review', hidden: true }, el('summary', {}, 'Review transactions'), preview);
+  const options = el('details', { class: 'bank-import-options', hidden: true }, el('summary', {}, 'Import options'),
+    field('Purpose for selected purchases', bulkPurpose, 'Optional. Existing choices stay unchanged unless you select a purpose here.'),
+    mappingHost, field('Keep card payments and transfers', keepReferences, 'Also keeps pending authorizations for reference. These do not count as spending.'),
+    el('button', { type: 'button', onclick: () => safe(buildPreview)() }, 'Apply options'),
+    sources, warnings, el('p', { class: 'help' }, 'Files are read on this device. Only imported transactions sync to your account.'));
   const body = el('div', { class: 'bank-import' },
-    el('p', { class: 'help' }, 'Files are read locally. Only saved transactions sync to your account.'),
-    matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear matches to your Work expenses are classified when saved; uncertain charges stay Needs review.') : null,
-    field('Excel exports', files), sources,
-    el('details', {}, el('summary', {}, 'Import options and card labels'), mappingHost,
-      field('Keep repayments, transfers and pending authorizations for reference', keepReferences, 'Excluded from spending. Posted charges replace matching saved pending authorizations.')),
-    summary, preview, el('div', { class: 'bank-import-save' }, saveButton, status));
+    field('Choose Excel files', files),
+    matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear Work matches are handled automatically.') : null,
+    summary, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
   const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
   const active = () => scopeIsCurrent() && dialog.open && dialog.isConnected && !aborter.signal.aborted;
-  const invalidate = () => { valid = false; selected.clear(); saveButton.disabled = true; preview.replaceChildren(el('p', { class: 'help' }, 'Options changed. Build the preview again before saving.')); };
+  const invalidate = () => { valid = false; selected.clear(); saveButton.disabled = true; status.textContent = 'Options changed. Apply options to continue.'; preview.replaceChildren(el('p', { class: 'help' }, 'Apply your import options to update this list.')); };
   const fail = error => { if (active()) { status.textContent = error.message || 'Could not read the files.'; status.classList.add('error'); } };
   const safe = run => async () => { try { assertScopeCurrent(); await run(); } catch (error) { fail(error); } };
 
@@ -77,13 +81,19 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
         return field(account.maskedCard || account.label, control);
       });
       mappingHost.replaceChildren(el('div', { class: 'bank-card-mapping' },
-        el('p', { class: 'help' }, 'Use the same card label for its statement and in-month download. Saved labels and explicit mappings in your workbook are proposed here. Different cards stay separate.'), el('div', { class: 'grid2' }, cardFields)),
-        el('button', { type: 'button', onclick: safe(buildPreview) }, 'Build preview'));
+        el('p', { class: 'help' }, 'Use the same label for each card across its downloads.'), el('div', { class: 'grid2' }, cardFields)));
       await buildPreview();
     } finally { busy = false; if (active()) updateSave(); }
   }));
   keepReferences.addEventListener('change', invalidate);
   view.addEventListener('change', () => { page = 1; paintRows(); });
+  bulkPurpose.addEventListener('change', () => {
+    if (!bulkPurpose.value || !valid) return;
+    for (const item of plan.filter(item => selected.has(item.id) && ['new', 'possible-match'].includes(item.status) && spending(item.row))) {
+      edited.set(item.id, { ...edited.get(item.id), spendingPurpose: bulkPurpose.value, bankReviewFields: [...new Set([...(edited.get(item.id)?.bankReviewFields || []), 'spendingPurpose'])] });
+    }
+    bulkPurpose.value = ''; paintRows();
+  });
 
   async function buildPreview() {
     if (!workbooks.length) throw Error('Choose your Excel exports first.');
@@ -91,31 +101,27 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     parsed = workbooks.map(book => parseBankWorkbook(book, { cardAliases: aliases }));
     plan = planBankImport(parsed, existing, { cardAliases: aliases, keepReferenceRows: keepReferences.checked });
     edited = new Map(); selected = new Set(plan.filter(item => item.status === 'new').map(item => item.id));
-    valid = true; page = 1; status.classList.remove('error'); status.textContent = 'Nothing saved yet.';
+    valid = true; page = 1; status.classList.remove('error'); status.textContent = '';
+    review.hidden = false; options.hidden = false;
     const counts = Object.fromEntries(['new', 'duplicate', 'possible-match', 'enrichment', 'excluded', 'error'].map(key => [key, plan.filter(item => item.status === key).length]));
-    summary.replaceChildren(el('p', {}, [[counts.new, 'new'], [counts.duplicate, 'duplicates skipped'], [counts['possible-match'], 'possible matches'], [counts.enrichment, 'workbook updates to review'], [counts.excluded, 'excluded'], [counts.error, 'errors']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ') || 'No importable rows'),
-      ...[...new Set(parsed.flatMap(file => file.warnings || []))].map(message => el('small', {}, message)));
+    const needsReview = counts['possible-match'] + counts.enrichment;
+    summary.replaceChildren(el('p', {}, counts.new ? `${counts.new} transaction${counts.new === 1 ? '' : 's'} ready to import` : 'No new transactions'),
+      el('small', {}, [[counts.duplicate, 'duplicates skipped'], [needsReview, 'need review'], [counts.error, 'cannot be imported'], [counts.excluded, 'excluded']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ')),
+      ...(needsReview ? [el('small', { class: 'bank-review-needed' }, 'Review these before selecting them.')] : []));
+    warnings.replaceChildren(...[...new Set(parsed.flatMap(file => file.warnings || []))].map(message => el('small', {}, message)));
     paintRows();
   }
   function currentRow(item) { return { ...item.row, ...edited.get(item.id) }; }
   function updateSave() {
     saveButton.disabled = !valid || !selected.size || busy;
-    saveButton.textContent = selected.size ? `Save ${selected.size} reviewed transactions` : 'Save reviewed transactions';
+    saveButton.textContent = selected.size ? `Import ${selected.size} transaction${selected.size === 1 ? '' : 's'}` : 'Import';
+    if (valid && summary.firstElementChild) summary.firstElementChild.textContent = selected.size ? `${selected.size} transaction${selected.size === 1 ? '' : 's'} ready to import` : 'No transactions selected';
   }
   function paintRows() {
     if (!valid || !active()) return;
     const chosen = plan.filter(item => view.value === 'all' || item.status === view.value);
     const pages = Math.max(1, Math.ceil(chosen.length / 25)); page = Math.min(page, pages);
     const heading = el('div', { class: 'bank-preview-controls' }, view, ['possible-match', 'enrichment', 'all'].includes(view.value) ? el('small', {}, 'Possible matches and workbook updates are unchecked. Select a possible match only if it is a separate transaction.') : null);
-    const bulkPurpose = pick([['', 'Set purpose for selected purchases…'], ...purposes], '', 'Purpose for selected purchases');
-    bulkPurpose.addEventListener('change', () => {
-      if (!bulkPurpose.value) return;
-      for (const item of plan.filter(item => selected.has(item.id) && ['new', 'possible-match'].includes(item.status) && spending(item.row))) {
-        edited.set(item.id, { ...edited.get(item.id), spendingPurpose: bulkPurpose.value, bankReviewFields: [...new Set([...(edited.get(item.id)?.bankReviewFields || []), 'spendingPurpose'])] });
-      }
-      paintRows();
-    });
-    heading.append(bulkPurpose);
     const list = el('div', { class: 'bank-preview-rows' });
     for (const [offset, item] of chosen.slice((page - 1) * 25, page * 25).entries()) {
       const row = currentRow(item), enabled = ready(item), position = (page - 1) * 25 + offset + 1;
@@ -124,16 +130,18 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       const entry = el('div', { class: 'bank-preview-row' }, el('div', { class: 'bank-preview-main' }, cb,
         el('span', {}, el('strong', {}, row.merchant || row.bankDescription || 'Unrecognized row'), el('small', {}, `${row.date || 'Invalid date'} · ${row.card || 'Unspecified card'} · ${kinds[row.bankKind || row.kind] || row.kind}`)),
         el('b', { class: 'amt' }, row.error ? '—' : `${money(row)} ${row.currency || ''}`)),
-        el('small', { class: item.status === 'possible-match' || item.status === 'error' ? 'bank-review-needed' : 'help' }, item.reason),
-        el('small', { class: 'bank-provenance' }, `${row.sourceFile || ''} · ${row.sourceSheet || ''} · row ${row.sourceRow || ''}`));
-      if (item.status === 'enrichment') entry.append(el('ul', {}, ...(item.enrichmentChanges || []).map(change => el('li', {}, `${change.label}: ${change.before || '(empty)'} → ${change.after}`))));
+        item.status !== 'new' ? el('small', { class: item.status === 'possible-match' || item.status === 'error' ? 'bank-review-needed' : 'help' }, item.reason) : null);
+      const rowDetails = el('details', { class: 'bank-transaction-details' }, el('summary', {}, item.status === 'enrichment' ? 'Review changes' : enabled && spending(row) ? 'Edit details' : 'Source details'));
+      if (item.status === 'enrichment') rowDetails.append(el('ul', {}, ...(item.enrichmentChanges || []).map(change => el('li', {}, `${change.label}: ${change.before || '(empty)'} → ${change.after}`))));
       if (enabled && item.status !== 'enrichment' && spending(row)) {
         const category = el('input', { value: row.personalCategory || row.category || 'Uncategorized', maxlength: 80, 'aria-label': `Category for transaction ${position}` });
         const purpose = pick(purposes, purposeOf(row), `Purpose for transaction ${position}`);
         const change = field => edited.set(item.id, { ...edited.get(item.id), [field]: field === 'personalCategory' ? category.value.trim() || 'Uncategorized' : purpose.value, bankReviewFields: [...new Set([...(edited.get(item.id)?.bankReviewFields || []), field])] });
         category.addEventListener('input', () => change('personalCategory')); purpose.addEventListener('change', () => change('spendingPurpose'));
-        entry.append(el('div', { class: 'bank-review-fields' }, field('Category', category), field('Purpose', purpose)));
+        rowDetails.append(el('div', { class: 'bank-review-fields' }, field('Category', category), field('Purpose', purpose)));
       }
+      rowDetails.append(el('small', { class: 'bank-provenance' }, `${row.sourceFile || ''} · ${row.sourceSheet || ''} · row ${row.sourceRow || ''}`));
+      entry.append(rowDetails);
       list.append(entry);
     }
     const previous = el('button', { type: 'button', disabled: page <= 1, onclick: () => { page--; paintRows(); } }, 'Previous');
@@ -199,7 +207,7 @@ export async function openBankTransaction(id, { settings, onChange = () => {}, s
   const save = el('button', { type: 'button', class: 'primary' }, 'Save transaction');
   const d = openDialog('Bank transaction', el('div', { class: 'form' }, description,
     !spending(row) ? el('p', { class: 'help' }, 'Kept for reference and excluded from spending totals.') : null,
-    row.workExpenseLink?.workspace === 'work' ? el('p', { class: 'help' }, `Linked to Work expense ${row.workExpenseLink.expenseId}. Changing its purpose to Personal or Needs review removes the link; the Work expense is unchanged.`) : row.workTripSuggestion?.workspace === 'work' ? el('p', { class: 'help' }, 'Classified as Work after your trip review. This has not created a Work expense or reimbursement.') : null,
+    row.workExpenseLink?.workspace === 'work' ? el('p', { class: 'help' }, 'Matched with Work. Choosing Personal or Needs review removes this match.') : row.workTripSuggestion?.workspace === 'work' ? el('p', { class: 'help' }, 'Marked as Work after your trip review. No expense claim was created.') : null,
     field('Merchant', merchant), spending(row) ? field('Category', category) : null, spending(row) ? field('Purpose', purpose) : null, field('Note', note),
     el('div', { class: 'actions' }, save, confirmButton('Delete transaction', async () => {
       try { assertScopeCurrent(); await atomicBatchSave([{ table: 'expenses', record: { ...row, deleted: true }, expectedUpdatedAt: row.updated_at }], { label: 'Delete bank transaction' }); if (!scopeIsCurrent()) return; d.close(); await onChange(); sync(); }
