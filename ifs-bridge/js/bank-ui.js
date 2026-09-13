@@ -30,7 +30,7 @@ export function bankExpenseRecord(item, { sheet, settings, batchId, at }) {
   return record;
 }
 
-export async function openBankImport({ settings, sheet, onChange = () => {}, sync = () => {}, readFiles = readBankFiles }) {
+export async function openBankImport({ settings, sheet, onChange = () => {}, sync = () => {}, readFiles = readBankFiles, matchWork }) {
   assertScopeCurrent();
   const currentSettings = typeof settings === 'function' ? settings : () => settings;
   const aborter = new AbortController();
@@ -44,12 +44,13 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   const summary = el('div', { class: 'bank-import-summary' });
   const body = el('div', { class: 'bank-import' },
     el('p', { class: 'help' }, 'Files are read locally. Only saved transactions sync to your account.'),
+    matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear matches to your Work expenses are classified when saved; uncertain charges stay Needs review.') : null,
     field('Excel exports', files), sources,
     el('details', {}, el('summary', {}, 'Import options and card labels'), mappingHost,
       field('Keep repayments, transfers and pending authorizations for reference', keepReferences, 'Excluded from spending. Posted charges replace matching saved pending authorizations.')),
     summary, preview, el('div', { class: 'bank-import-save' }, saveButton, status));
   const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
-  const active = () => scopeIsCurrent() && dialog.isConnected && !aborter.signal.aborted;
+  const active = () => scopeIsCurrent() && dialog.open && dialog.isConnected && !aborter.signal.aborted;
   const invalidate = () => { valid = false; selected.clear(); saveButton.disabled = true; preview.replaceChildren(el('p', { class: 'help' }, 'Options changed. Build the preview again before saving.')); };
   const fail = error => { if (active()) { status.textContent = error.message || 'Could not read the files.'; status.classList.add('error'); } };
   const safe = run => async () => { try { assertScopeCurrent(); await run(); } catch (error) { fail(error); } };
@@ -142,7 +143,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   }
   saveButton.addEventListener('click', safe(async () => {
     if (!valid || busy || !selected.size) return;
-    busy = true; saveButton.disabled = true;
+    busy = true; saveButton.disabled = true; body.inert = true;
     try {
       const latest = await db.all('expenses'); if (!active()) return;
       const fresh = planBankImport(parsed, latest, { cardAliases: aliases, keepReferenceRows: keepReferences.checked });
@@ -162,13 +163,25 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       // A posted charge and removal of its earlier pending snapshot are one Undo.
       const pendingIds = new Set(chosen.flatMap(item => item.matchingPendingIds || []));
       for (const id of pendingIds) { const prior = latest.find(row => row.id === id); if (prior && !prior.deleted) items.push({ table: 'expenses', record: { ...prior, deleted: true }, expectedUpdatedAt: prior.updated_at }); }
+      // Matching prepares these records before their first write. Import,
+      // classification and pending-row replacement therefore share one Undo.
+      let prepared = { items, matched: 0, message: '' };
+      if (matchWork) {
+        status.textContent = 'Checking your Work expenses…';
+        prepared = await matchWork({ items, existingRows: latest, isCurrent: active });
+        if (!active()) return;
+        if (!Array.isArray(prepared?.items) || prepared.items.length !== items.length ||
+          prepared.items.some((item, index) => item.table !== items[index].table || item.record?.id !== items[index].record.id || item.expectedUpdatedAt !== items[index].expectedUpdatedAt) ||
+          !Number.isSafeInteger(prepared.matched) || prepared.matched < 0 || prepared.matched > chosen.length) throw Error('Work matching returned an invalid import. Nothing was saved.');
+      }
       assertScopeCurrent();
-      await atomicBatchSave(items, { label: `Import ${chosen.length} bank transactions / updates` });
+      const matched = prepared.matched, matchMessage = String(prepared.message || '');
+      await atomicBatchSave(prepared.items, { label: `Import ${chosen.length} bank transactions / updates${matched ? ` · ${matched} matched to Work` : ''}`, ...(matched ? { expectedExpenses: latest } : {}) });
       if (!active()) return;
       dialog.close();
-      await onChange({ entry: items.find(item => !item.record.deleted)?.record });
-      sync(); toast(`${chosen.length} transactions saved. The whole import has one History Undo.`);
-    } finally { busy = false; if (active()) updateSave(); }
+      await onChange({ entry: prepared.items.find(item => !item.record.deleted)?.record, ...(matchWork ? { matched, matchMessage } : {}) });
+      sync(); toast(`${chosen.length} transactions saved.${matched ? ` ${matched} matched to Work.` : ''} The whole import has one History Undo.${matchMessage ? ` ${matchMessage}` : ''}`);
+    } finally { busy = false; if (active()) { body.inert = false; updateSave(); } }
   }));
   return dialog;
 }

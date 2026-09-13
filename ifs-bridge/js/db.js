@@ -113,8 +113,11 @@ function assertUniqueWorkLinks(existing, replacements) {
 
 // Splits, imports and recurring entries commit together, with one undo step.
 // Preconditions are checked in that same transaction, before any record changes.
-export async function atomicBatchSave(items, { label = 'Edit records', uniqueWorkExpenseLinks = false } = {}) {
+export async function atomicBatchSave(items, { label = 'Edit records', uniqueWorkExpenseLinks = false, expectedExpenses } = {}) {
   if (!items.length) return [];
+  if (expectedExpenses !== undefined && !Array.isArray(expectedExpenses)) throw Error('The expense comparison is incomplete.');
+  const expenseSnapshot = expectedExpenses === undefined ? null : new Map(expectedExpenses.map(row => [row.id, row]));
+  if (expenseSnapshot && expenseSnapshot.size !== expectedExpenses.length) throw Error('The expense comparison contains duplicate records.');
   const seen = new Set();
   const changes = items.map(item => {
     if (!RECORD_STORES.includes(item.table)) throw Error('Unsupported record type.');
@@ -125,13 +128,19 @@ export async function atomicBatchSave(items, { label = 'Edit records', uniqueWor
   // Splits, templates and other editors must respect links too, even when they
   // did not originate in the card-review tool.
   uniqueWorkExpenseLinks ||= changes.some(item => item.table === 'expenses' && item.record.workExpenseLink?.expenseId);
+  const readExpenses = uniqueWorkExpenseLinks || expenseSnapshot !== null;
   const d = await open(); assertScopeCurrent();
   const saved = await new Promise((resolve, reject) => {
-    const t = d.transaction([...new Set([...changes.map(c => c.table), ...(uniqueWorkExpenseLinks ? ['expenses'] : [])]), 'history'], 'readwrite');
-    const before = [], output = [], audit = []; let left = changes.length + (uniqueWorkExpenseLinks ? 1 : 0), existingExpenses = [];
+    const t = d.transaction([...new Set([...changes.map(c => c.table), ...(readExpenses ? ['expenses'] : [])]), 'history'], 'readwrite');
+    const before = [], output = [], audit = []; let left = changes.length + (readExpenses ? 1 : 0), existingExpenses = [];
     const guarded = guardTransaction(t, resolve, reject, () => output);
     const commit = () => {
         if (--left) return;
+        // An unlinked charge added by another tab can make a previously unique
+        // match ambiguous. Check the whole comparison inside this write lock.
+        if (expenseSnapshot && (existingExpenses.length !== expenseSnapshot.size || existingExpenses.some(row => !sameVersion(row, expenseSnapshot.get(row.id))))) {
+          throw Error('Purchases changed while matching with Work. Nothing was saved. Try again with the latest purchases.');
+        }
         changes.forEach((item, j) => {
           const prior = before[j];
           if ('expectedUpdatedAt' in item && (item.expectedUpdatedAt === null ? !!prior : prior?.updated_at !== item.expectedUpdatedAt)) throw Error('A record changed in another tab. Refresh and review it before trying again.');
@@ -149,7 +158,7 @@ export async function atomicBatchSave(items, { label = 'Edit records', uniqueWor
         });
         t.objectStore('history').put({ id: uuid(), at: now(), label, scope: SCOPE.key, changes: audit });
     };
-    if (uniqueWorkExpenseLinks) {
+    if (readExpenses) {
       const req = t.objectStore('expenses').getAll();
       req.onsuccess = () => guarded(() => { existingExpenses = req.result; commit(); });
     }

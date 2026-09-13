@@ -70,6 +70,7 @@ export async function readOnlyWorkContext() {
   const client = new Supabase(getConnection());
   if (!client.configured || globalThis.navigator?.onLine === false) {
     return { ...Object.fromEntries(TABLES.map(table => [table, local[table].filter(row => !row.deleted)])),
+      source: 'local', canAutoMatch: false,
       notice: 'Using Work records saved on this device. Connect to refresh cloud matches.' };
   }
   const remote = await readCloudWork(client, scope); assertScopeCurrent();
@@ -86,5 +87,8 @@ export async function readOnlyWorkContext() {
     }
     result[table] = [...combined.values()].filter(row => !row.deleted);
   }
-  return { ...result, notice: conflicts ? 'Some Work records have sync conflicts and were omitted. Resolve those in Work before matching them.' : '' };
+  // Missing conflicting rows could hide a second candidate, so only a complete
+  // refreshed comparison may classify purchases without individual review.
+  return { ...result, source: 'cloud', canAutoMatch: conflicts === 0,
+    notice: conflicts ? 'Some Work records have sync conflicts and were omitted. Resolve those in Work before matching them.' : '' };
 }

@@ -1,4 +1,4 @@
-// Suggestions are pure data. Only a separate, explicit review action creates
+// Matching and suggestions are pure data. Callers explicitly save guarded
 // Personal changes; this module never writes to the Work ledger or a service.
 import { minorAmount, validDate, isSpendingRecord, spendingPurpose } from './expense-workflows.js';
 import { personalMonthBounds } from './personal-analytics.js';
@@ -59,6 +59,69 @@ export function planWorkMatches(bankRows, context, options = {}) {
   const uses = new Map();
   for (const item of result) for (const candidate of item.candidates) uses.set(candidate.expenseId, (uses.get(candidate.expenseId) || 0) + 1);
   return result.map(item => ({ ...item, candidates: item.candidates.map(candidate => ({ ...candidate, contested: uses.get(candidate.expenseId) > 1 })), ambiguous: item.candidates.length > 1 || item.candidates.some(candidate => uses.get(candidate.expenseId) > 1), status: item.candidates.length ? 'suggested' : 'unmatched' }));
+}
+function automaticOptions(options = {}) {
+  const result = { month: options.month, dateWindow: options.dateWindow ?? 3 };
+  validateOptions(result);
+  if (result.dateWindow > 3) throw Error('Automatic matching uses at most three days between the purchase and posting dates.');
+  return result;
+}
+function hasPurposeDecision(bank) {
+  // Imports start at Needs review without these markers. A deliberate choice
+  // of Needs review must remain just as protected as Personal or Work.
+  return spendingPurpose(bank) !== 'review' || !!bank.purposeReviewedAt ||
+    (bank.bankReviewFields || []).some(field => ['spendingPurpose', 'business', 'usage'].includes(field)) ||
+    !!bank.workTripSuggestion;
+}
+export function planAutomaticWorkMatches(bankRows, context, options = {}) {
+  const resolved = automaticOptions(options);
+  // Build the collision graph from ALL bank rows first. A month filter must
+  // never hide another charge competing for the same Work expense.
+  const all = planWorkMatches(bankRows, context, { dateWindow: resolved.dateWindow });
+  const items = all.filter(item => inMonth(item.bank, resolved.month)).map(item => {
+    if (hasPurposeDecision(item.bank)) return { ...item, status: 'skipped', reason: 'Your existing purpose decision is kept.' };
+    if (!item.candidates.length) return { ...item, status: 'unmatched', reason: 'No Work purchase has the same amount and currency within the posting window.' };
+    if (item.ambiguous) return { ...item, status: 'review', reason: 'More than one purchase could explain this charge. No automatic link was made.' };
+    if (item.candidates[0].level !== 'merchant') return { ...item, status: 'review', reason: 'The amount and date fit, but the merchant needs a check.' };
+    return { ...item, status: 'automatic', match: { bankId: item.bankId, expenseId: item.candidates[0].expenseId }, reason: 'Unique Work purchase with the same merchant, amount and currency within the posting window.' };
+  });
+  const matches = items.filter(item => item.status === 'automatic');
+  const review = items.filter(item => item.status === 'review');
+  const skipped = items.filter(item => item.status === 'skipped');
+  const unmatched = items.filter(item => item.status === 'unmatched');
+  return { options: resolved, matches, review, skipped, unmatched, items, counts: {
+    matched: matches.length, review: review.length, skipped: skipped.length,
+    unmatched: unmatched.length, unresolved: review.length + unmatched.length,
+    workExpenses: context.expenses.filter(workPurchase).length,
+  } };
+}
+export function prepareAutomaticWorkMatchChanges(bankRows, context, preview, { at, ...options } = {}) {
+  if (!Array.isArray(preview?.matches)) throw Error('Automatic matching needs a current Work comparison. Check Work again.');
+  const resolved = automaticOptions({ ...preview.options, ...options });
+  const current = planAutomaticWorkMatches(bankRows, context, resolved);
+  if (!preview.matches.length) return [];
+  const choices = preview.matches.map(before => {
+    const now = current.matches.find(item => item.bankId === before.bankId);
+    // A new conflicting charge or Work expense invalidates the whole batch,
+    // even when the originally selected pair itself has not changed.
+    if (!now || now.match.expenseId !== before.match?.expenseId || now.expectedVersion !== before.expectedVersion ||
+      now.candidates[0].expectedVersion !== before.candidates?.[0]?.expectedVersion) {
+      throw Error('The bank or Work comparison changed. Check Work again before matching.');
+    }
+    return now.match;
+  });
+  const changes = prepareWorkMatchChanges(bankRows, context, choices, preview.matches, { ...resolved, at });
+  return changes.map(change => {
+    const item = current.matches.find(row => row.bankId === change.record.id), candidate = item.candidates[0];
+    return { ...change, record: { ...change.record, workExpenseLink: {
+      ...change.record.workExpenseLink, method: 'automatic', evidence: {
+        amountMinor: amount(item.bank), currency: currency(item.bank),
+        bankDate: item.bank.date, workDate: candidate.expense.date,
+        dateGap: candidate.dateGap, dateWindow: resolved.dateWindow,
+        merchant: merchantKey(item.bank.merchant || item.bank.vendor || item.bank.bankDescription),
+      },
+    } } };
+  });
 }
 function validateSelections(choices, field = 'bankId') {
   if (!Array.isArray(choices) || !choices.length) throw Error('Select at least one transaction first.');
