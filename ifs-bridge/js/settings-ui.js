@@ -5,13 +5,11 @@ import { createSettingsDraft, decimalSetting, validateStructuredSettings, mergeS
 import { renderTimeSetup, validateTimeSettings } from './settings-time.js';
 import { renderProjectSettings, validateProjectSettings } from './settings-projects.js';
 import { parseCopyObject } from './ifs.js';
-import { timeCodeInfo } from './time-codes.js';
 
 const groups = {
-  connections: { label: 'Clockify', description: 'API key and connection' },
-  time: { label: 'Timesheets', description: 'Hours, tag meanings and IFS project destinations' },
+  time: { label: 'Work setup', description: 'Schedule, all time types, pay and project destinations' },
+  connections: { label: 'Clockify', description: 'One connection shared across your devices' },
   spending: { label: 'Expenses', description: 'Categories, currencies, daily allowances and IFS export' },
-  pay: { label: 'Pay', description: 'Hourly rate, paid rest days and leave pay' },
   app: { label: 'Account & app', description: 'Sign-in, authenticator, appearance and time zone' },
   backup: { label: 'Import / export', description: 'Move settings, download data or restore a backup' }
 };
@@ -106,9 +104,9 @@ export function createSettingsPage(options) {
     catch (error) { setMessage(error.message); return; }
     pending = true; changed();
     try {
-      await onSave(next);
+      const result = await onSave(next);
       if (!current() || session !== savingSession) return;
-      session.committed(next); pending = false; paint(); setMessage('Saved. Your new setup is now in use.');
+      session.committed(next); pending = false; paint(); setMessage(result?.message || 'Saved. Your new setup is now in use.');
     } catch (error) { if (current() && session === savingSession) { pending = false; changed(); setMessage(`Save failed: ${error.message}. Your draft is still here.`); } }
   }
   function review() {
@@ -128,7 +126,7 @@ export function createSettingsPage(options) {
       validGroups.filter(name => name !== 'home').map(name => button('', () => navigate(name), {
         class: 'settings-home-link', 'data-group': name,
         'aria-label': labelFor(name)
-      }))), el('p', { class: 'settings-home-note' }, 'Choose what you want to change. Edits take effect when you Save.')];
+      }))), el('p', { class: 'settings-home-note' }, 'Settings follow your account across devices. Changes take effect when you Save.')];
   }
   function connections() {
     const s = draft();
@@ -151,47 +149,17 @@ export function createSettingsPage(options) {
     }, { id: 'test-clockify-connection' });
     const editor = disclosure('API key', 'Add or change the saved connection', field('Clockify API key', key, 'Find this in Clockify → Profile settings → API.'));
     editor.open = !s.clockify.apiKey;
-    return [card('Connection', status, test), editor,
+    return [disclosure('Connection status', 'Test the saved Clockify connection', status, test), editor,
       button('Set up hours, tags and IFS projects', () => navigate('time'), { class: 'settings-next-link' })];
   }
   function appSettings() {
-    const s = draft(), theme = options.getTheme?.() || 'auto';
-    const cloud = disclosure('Cloud connection test', 'Check account access without syncing records', options.connectionStatusPanel?.() || el('p', {}, 'Open Account & Security to manage cloud access.'));
-    return [card('Account & security', el('p', { class: 'help' }, 'Manage sign-in, authenticator protection and cloud setup.'),
-      button('Open Account & Security', () => { if (current()) options.openAccount?.(); })), cloud,
-      card('Appearance', field('Theme', el('select', { 'aria-label': 'Appearance', onchange: event => options.setTheme?.(event.target.value) },
-        [['auto', 'Follow system'], ['light', 'Light'], ['dark', 'Dark']].map(([value, label]) => el('option', { value, selected: value === theme }, label))), 'Applies immediately on this device.')),
-      card('Dates & times', field('Time zone', input(s, 'timeZone', 'Time zone'), 'Used to group dates and hours in this space. Choose Save to apply.'))];
-  }
-  function paySettings() {
-    const s = draft(), tags = s.timeCalculationMode === 'tags';
-    const checkbox = (key, label) => el('label', { class: 'inline' }, el('input', { type: 'checkbox', checked: s[key] !== false, onchange: event => { if (!current()) return; s[key] = event.target.checked; changed(); } }), label);
-    const nodes = [card('Hourly pay', el('div', { class: 'grid2' }, field('Hourly rate', number(s, 'payRate', 'Hourly rate')), field('Currency', currency(s, 'payCurrency', 'Pay currency'))),
-      el('p', { class: 'help' }, 'Used for the pay estimate on Overview.'))];
-    nodes.push(tags ? card('Recorded hours only', el('p', { class: 'help' }, 'Clockify tag mode does not add day minimums or paid rest hours.')) : disclosure('Minimum pay & rest days', 'Optional additions for automatic time calculation',
-      field('Minimum paid hours per day', number(s, 'payMinDay', 'Pay day minimum', { max: 24 })), checkbox('restDaysPaid', 'Include paid rest days'), field('Hours per rest day', number(s, 'restDayHours', 'Rest-day hours', { max: 24 }))));
-    const rows = (s.timeCodeMappings || []).filter(row => row.mode === 'code' && timeCodeInfo(row.code));
-    const overrides = el('div', { class: 'settings-pay-overrides' });
-    for (const row of rows) {
-      const info = timeCodeInfo(row.code);
-      const multiplier = el('input', { type: 'number', min: 0, max: 10, step: 0.25, value: row.payMultiplier ?? '',
-        placeholder: info.scope === 'work' ? `Default ×${info.payMultiplier}` : 'Unknown', 'aria-label': `Pay multiplier for ${row.tagName}` });
-      const status = el('small', { role: 'status', class: 'help' });
-      multiplier.addEventListener('input', () => {
-        if (!current()) return;
-        const value = multiplier.value === '' ? null : Number(multiplier.value);
-        row.payMultiplier = value; row.confirmed = false;
-        status.textContent = 'Changed. Review and confirm this tag in Timesheets before exporting it.'; changed();
-      });
-      overrides.append(el('div', { class: 'settings-pay-row' },
-        field(row.tagName || info.label, multiplier, `${info.label} · ${row.code}`), status));
-    }
-    const multipliers = disclosure('Overtime & leave multipliers', `${rows.length} mapped time types · blank uses the work default or leaves leave pay unknown`,
-      rows.length ? overrides : el('p', { class: 'help' }, 'Map your Clockify tags in Timesheets first.'),
-      button('Review tag meanings in Timesheets', () => navigate('time', 'time-code-rows'), { class: 'link' }));
-    multipliers.id = 'pay-multipliers';
-    nodes.push(multipliers);
-    return nodes;
+    const s = draft();
+    return [disclosure('Account & security', 'Sign-in, authenticator and cloud connection',
+      button('Open Account & Security', () => { if (current()) options.openAccount?.(); })),
+      disclosure('Appearance', 'Saved to your account with the rest of your settings',
+        field('Theme', select(s, 'theme', 'Appearance', [['auto', 'Follow system'], ['light', 'Light'], ['dark', 'Dark']]))),
+      disclosure('Dates & times', 'The time zone used for this space',
+        field('Time zone', input(s, 'timeZone', 'Time zone')))];
   }
   function simpleList(key, label, placeholder = '') {
     const s = draft(), host = el('div', { class: 'settings-list-editor' });
@@ -229,12 +197,12 @@ export function createSettingsPage(options) {
   }
   function spending() {
     const s = draft(), nodes = [card('Currency', field('Default currency', currency(s, 'defaultCurrency', 'Default currency')), advanced('Available currencies', simpleList('currencies', 'Currency', 'USD'))), categories()];
-    if (workspace === 'personal') return [nodes[0], foldCard(nodes[1], `${s.expenseCodes.length} categories · names used for your spending`)];
+    if (workspace === 'personal') return [foldCard(nodes[0], 'Default and available currencies'), foldCard(nodes[1], `${s.expenseCodes.length} categories · names used for your spending`)];
     nodes.push(card('Exchange rates', el('div', { class: 'grid2' }, field('Home currency', currency(s, 'homeCurrency', 'Home currency')),
       field('Exchange-rate source', select(s, 'rateSource', 'Exchange-rate source', [['tcmb', 'Daily Central Bank rate'], ['manual', 'Rate entered on the expense sheet']]))),
       advanced('Advanced · IFS rate fields', field('TCMB rate column', select(s, 'tcmbField', 'TCMB rate column', [['ForexBuying', 'Döviz alış'], ['ForexSelling', 'Döviz satış'], ['BanknoteBuying', 'Efektif alış'], ['BanknoteSelling', 'Efektif satış']])),
         field('If a rate is unavailable', select(s, 'currRateMode', 'Missing-rate behavior', [['blank', 'Send the field empty'], ['omit', 'Omit the rate field'], ['one', 'Always 1 (legacy behavior)']])))), perDiem(),
-      card('IFS expense destinations', simpleList('costObjects', 'Cost object', '/Personal 1'), advanced('Advanced · IFS destinations', field('Activity suffix', input(s, 'expenseActivitySuffix', 'Expense activity suffix')), simpleList('knownShortNames', 'Destination', 'PROJECT.SUBPROJECT.ACTIVITY'))));
+      card('IFS expense defaults', el('p', { class: 'help' }, 'Each project’s expense destination is in Work setup → Projects. This section contains only defaults and non-project cost objects.'), button('Set project expense destinations', () => navigate('projects'), { class: 'link' }), simpleList('costObjects', 'Cost object', '/Personal 1'), advanced('Default activity suffix', field('Activity suffix', input(s, 'expenseActivitySuffix', 'Expense activity suffix'), 'Used when a project has no explicit expense destination.'))));
     const template = el('textarea', { rows: 6, 'aria-label': 'Expense row template', spellcheck: 'false', oninput: event => { s.expenseTemplate = event.target.value; changed(); } }, s.expenseTemplate || '');
     const pasted = el('textarea', { rows: 3, 'aria-label': 'Copied expense row', placeholder: 'Paste one IFS Expense Details Copy Object row…' }), status = el('p', { class: 'help', role: 'status' });
     nodes.push(card('IFS expense template', advanced('Advanced · copied row and raw template', pasted,
@@ -242,14 +210,12 @@ export function createSettingsPage(options) {
         if (!current()) return;
         const rec = parseCopyObject(pasted.value);
         if (rec?.lu !== 'ExpenseDetail') { status.textContent = 'Paste an Expense Details Copy Object row.'; return; }
-        const seen = rec.fields.find(f => f.name === 'SHORT_NAME')?.value?.trim();
-        if (seen && !(s.knownShortNames || []).includes(seen)) s.knownShortNames = [...(s.knownShortNames || []), seen];
         for (const f of rec.fields) if (['EXPENSE_ID', 'ACCOUNT_DATE', 'EXPENSE_CODE', 'DESCRIPTION', 'REFERENCE', 'CURRENCY_CODE', 'GROSS_CURR_AMOUNT', 'SEQ_NO', 'SHORT_NAME', 'C_SHORT_NAME'].includes(f.name)) f.value = '';
         s.expenseTemplate = ['!IFS.COPYOBJECT', `$LU=${rec.lu}`, `$VIEW=${rec.view}`, '$RECORD=!', ...rec.fields.map(f => `-$${f.n}:${f.name}=${f.value}`), '-'].join('\n');
         template.value = s.expenseTemplate; status.textContent = 'Copied row loaded into your draft. Save settings to keep it.'; changed();
       }), status, field('Raw row template', template))));
     nodes[nodes.length - 1].id = 'expense-template';
-    return nodes.map((node, index) => index === 0 ? node : foldCard(node, [null, `${s.expenseCodes.length} categories · names and IFS codes`, 'Where conversion rates come from', `${(s.perDiemDefaults || []).length} country rates`, 'Cost objects and project activity names', 'Copied IFS expense row · initial setup only'][index]));
+    return nodes.map((node, index) => foldCard(node, ['Default and available currencies', `${s.expenseCodes.length} categories · names and IFS codes`, 'Where conversion rates come from', `${(s.perDiemDefaults || []).length} country rates`, 'Non-project cost objects and the fallback activity suffix', 'Copied IFS expense row · initial setup only'][index]));
   }
   function backup() {
     const s = draft(), status = el('p', { id: 'settings-transfer-status', class: 'help', role: 'status' });
@@ -270,7 +236,7 @@ export function createSettingsPage(options) {
         }, { class: 'primary', id: 'settings-apply' }), button('Cancel', () => dialog.close())));
       } catch (error) { if (alive(ticket)) status.textContent = `Import failed: ${error.message}`; }
     });
-    const nodes = [card('Settings file', el('p', { class: 'help' }, `Export this ${workspace === 'personal' ? 'Personal' : 'Work'} setup for your phone or another browser. Records and login sessions are not included.`),
+    const nodes = [card('Settings file', el('p', { class: 'help' }, `Save a portable copy of this ${workspace === 'personal' ? 'Personal' : 'Work'} setup. Account sync already carries settings across your devices. This file excludes records and login sessions.`),
       workspace === 'work' ? el('label', { class: 'inline' }, includeKey, 'Include Clockify API key (readable in the file)') : '',
       el('div', { class: 'row' }, button('Export settings', () => {
         if (!current() || !validate()) return;
@@ -278,9 +244,9 @@ export function createSettingsPage(options) {
           (options.download || download)(`ifsbridge-${workspace}-settings-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json'); status.textContent = 'Settings file downloaded. It includes the current draft.';
         } catch (error) { status.textContent = error.message; }
       }, { id: 'settings-export' }), button('Import settings…', () => file.click(), { id: 'settings-import' }), importUndo ? button('Undo last import', () => { const previous = importUndo; importUndo = null; replaceDraft(previous); }, { id: 'settings-undo-import' }) : ''), file, status)];
-    nodes.push(card('Records & receipts backup', el('p', { class: 'help' }, 'These actions operate on saved records. Unsaved Settings edits are not included.'),
+    nodes.push(card('Full backup · settings, records & receipts', el('p', { class: 'help' }, 'Includes saved settings, records and receipts. Unsaved edits and login sessions are excluded.'),
       el('div', { class: 'row' }, button('Download full backup', () => options.backupRecords?.())),
-      advanced('Restore records from backup', el('p', { class: 'help' }, 'Save or discard your Settings draft first. Restoring records is separate from importing settings.'),
+      advanced('Restore records from backup', el('p', { class: 'help' }, 'Save or discard your Settings draft first. A full restore includes saved settings as well as records.'),
         field('Backup file', el('input', { type: 'file', accept: '.json,application/json', 'aria-label': 'Restore records file', onchange: async event => {
           const selected = event.target.files?.[0], ticket = generation; event.target.value = ''; if (!selected || !current()) return;
           if (dirty().length) { setMessage('Save or discard your Settings draft before restoring records.'); return; }
@@ -294,8 +260,8 @@ export function createSettingsPage(options) {
     nodes.push(card('Reset preferences', advanced('Reset this space to defaults', el('p', { class: 'help' }, 'Loads defaults into a draft. Your connection is kept; review and Save to apply. Records are unchanged.'), button('Load defaults into draft', () => {
       const keep = { clockify: jsonClone(s.clockify), supabase: jsonClone(s.supabase) }; replaceDraft({ ...options.defaults(), ...keep }); setMessage('Defaults loaded into the draft. Review before saving.');
     }, { class: 'link danger' }))));
-    const descriptions = { 'Records & receipts backup': 'Download or restore your saved records', 'Spreadsheet export': 'Export saved expenses as a CSV file', 'PC backup': 'Save a copy through the local backup service', 'Reset preferences': 'Restore default preferences into a draft' };
-    return nodes.map((node, index) => index === 0 ? node : foldCard(node, descriptions[node.querySelector('h3').textContent]));
+    const descriptions = { 'Full backup · settings, records & receipts': 'Download or restore the complete saved space', 'Spreadsheet export': 'Export saved expenses as a CSV file', 'PC backup': 'Save a copy through the local backup service', 'Reset preferences': 'Restore default preferences into a draft' };
+    return nodes.map(node => foldCard(node, descriptions[node.querySelector('h3').textContent] || 'Export a settings file or preview an import'));
   }
   function paintGroup() {
     fieldChecks = [];
@@ -307,12 +273,11 @@ export function createSettingsPage(options) {
     else if (group === 'connections') nodes = connections();
     else if (group === 'app') nodes = appSettings();
     else if (group === 'spending') nodes = spending();
-    else if (group === 'pay') nodes = paySettings();
     else if (group === 'backup') nodes = backup();
     else {
-      const time = renderTimeSetup(s, { ...opts, openPay: () => navigate('pay', 'pay-multipliers') });
+      const time = renderTimeSetup(s, { ...opts, onPolicyReset: () => { paintGroup(); changed(); }, sickBenefitTool: options.sickBenefitTool, openProjects: () => navigate('projects') });
       const projects = renderProjectSettings(s, { ...opts, onImportCatalog: time.refreshCatalog });
-      const projectSection = disclosure('IFS project destinations', `${(s.mapping || []).length} projects · choose where each timesheet goes`, projects.element);
+      const projectSection = disclosure('Projects', `${(s.mapping || []).length} projects · working hours, time and expense destinations`, projects.element);
       projectSection.id = 'settings-project-destinations';
       const id = s.identity ||= {};
       const employee = disclosure('IFS employee details', 'Company and employee identifiers · initial setup only',
@@ -333,6 +298,7 @@ export function createSettingsPage(options) {
     content.scrollTop = 0; errorBox.hidden = true;
   }
   function destination(name, focus) {
+    if (name === 'pay') return { name: 'time', focus: 'time-tags-settings' };
     if (name === 'projects') return { name: 'time', focus: focus || 'project-mapping' };
     if (name === 'expenses') name = 'spending';
     return { name, focus };
@@ -342,7 +308,7 @@ export function createSettingsPage(options) {
     if (!current() || pending || !validGroups.includes(name)) return;
     ++generation; group = name; paintGroup(); changed();
     if (focus) {
-      const target = { 'time-code-rows': 'time-tags-settings', 'project-mapping': 'project-read-clockify' }[focus] || focus;
+      const target = { 'time-code-rows': 'time-tags-settings', 'project-mapping': 'settings-project-destinations', 'pay-multipliers': 'time-tags-settings' }[focus] || focus;
       const token = String(target).replace(/[^a-zA-Z0-9_-]/g, '');
       const node = content.querySelector(`[data-setting="${token}"],#${token}`);
       if (node) {
@@ -368,6 +334,7 @@ export function createSettingsPage(options) {
     saveBar = el('div', { class: 'actions settings-save', hidden: true }, el('div', { class: 'settings-save-buttons' }, saveButton, reviewButton, discardButton), saveStatus);
     root.classList.add('settings-redesign', 'settings-focused');
     root.replaceChildren(el('div', { class: 'settings-page-header' }, navigation, heading),
+      ...(options.accountStatusPanel ? [options.accountStatusPanel()] : []),
       el('div', { class: 'settings-editor' }, errorBox, content), notice, saveBar);
     paintGroup(); changed();
   }

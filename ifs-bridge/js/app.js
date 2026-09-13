@@ -1,10 +1,13 @@
+import { createAccountPreferences } from './account-preferences.js';
+import { renderSickBenefitTool } from './sick-benefit.js';
+import { openLeaveEntryDialog } from './leave-entry.js';
 import { currentScope, scopedKey, scopeIsCurrent, assertScopeCurrent } from './scope.js';
 import { initWorkspaceUI, openAccount, connectionStatusPanel, initAuthGate, revealPrivateApp } from './workspace-ui.js';
 import { Clockify } from './clockify.js';
 import { buildWeek, mondayOf, fetchWindow, DAYS, localToUtc, utcToLocalInput } from './rules.js';
 import { timeCodeInfo } from './time-codes.js';
 import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber } from './ifs.js';
-import { loadSettings, saveSettings, defaultsForScope } from './store.js';
+import { loadSettings, saveSettings, defaultsForScope, hasSavedSettings } from './store.js';
 import { createSettingsPage } from './settings-ui.js';
 import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, openExpenseReview } from './expenses.js';
 import { el, $, confirmButton, toast, openDialog, download, field as dlgField } from './dom.js';
@@ -16,6 +19,7 @@ import { initPersonal, renderPersonal, reviewPersonal } from './personal.js';
 import { initShell, updateShell } from './shell.js';
 
 let settings = scopeIsCurrent() ? loadSettings() : null;
+let accountPreferences = null;
 let week = null;          // result of buildWeek
 let exportText = '';
 let weekLoadId = 0;       // Only the newest request may update the selected week.
@@ -125,7 +129,6 @@ async function loadWeek() {
       const u = await c.user();
       if (!scopeIsCurrent() || requestId !== weekLoadId) return;
       settings.clockify.userId = u.id; settings.clockify.workspaceId = u.activeWorkspace; settings.clockify.userName = u.name;
-      if (u.settings?.timeZone) settings.timeZone = u.settings.timeZone;
       saveSettings(settings);
     }
     const win = fetchWindow(monday, settings.timeZone);
@@ -206,11 +209,14 @@ function renderWeek() {
     el('td', {}, el('span', { class: 'code' }, r.code), r.directCode ? el('small', {}, r.description || 'Confirmed tag') : null),
     r.hours.map(h => el('td', { class: 'num' }, fmtH(h))),
     el('td', { class: 'num total' }, fmtH(r.total))));
-  const foot = el('tr', { class: 'totals' }, el('td', { colspan: 2 }, 'Day total'), w.dayTotals.map(h => el('td', { class: 'num' }, fmtH(h))), el('td', { class: 'num total' }, fmtH(w.weekTotal)));
+  const foot = el('tr', { class: 'totals' }, el('td', { colspan: 2 }, 'IFS total'), w.dayTotals.map(h => el('td', { class: 'num' }, fmtH(h))), el('td', { class: 'num total' }, fmtH(w.weekTotal)));
   host.append(el('div', { class: 'tbl' }, el('table', {}, el('thead', {}, head), el('tbody', {}, body.length ? body : el('tr', {}, el('td', { colspan: 10, class: 'empty' }, 'No hours for this week.'))), el('tfoot', {}, foot))));
   // The total already lives in the table. Keep the remaining details small and below the hours.
   const workedDays = w.dayTotals.filter(h => h > 0).length;
-  host.append(el('p', { class: 'week-meta muted' }, `${workedDays} day${workedDays === 1 ? '' : 's'} with hours · ${w.rows.length} IFS row${w.rows.length === 1 ? '' : 's'}`));
+  const generalHours = (w.addedGeneralDayTotals || []).reduce((sum, h) => sum + h, 0);
+  const recordedHours = (w.recordedDayTotals || []).reduce((sum, h) => sum + h, 0);
+  const generalNote = generalHours > 0 ? ` · ${fmtH(recordedHours)} h recorded + ${fmtH(generalHours)} h remaining as General` : '';
+  host.append(el('p', { class: 'week-meta muted' }, `${workedDays} day${workedDays === 1 ? '' : 's'} with hours · ${w.rows.length} IFS row${w.rows.length === 1 ? '' : 's'}${generalNote}`));
 
   // one action row: copy, view, entered status
   const copyBtn = el('button', { class: 'primary', disabled: w.canExport ? null : 'disabled', onclick: copyExport }, 'Copy for IFS');
@@ -422,7 +428,7 @@ function renderEntriesEditor(w) {
   const days = w.dates.map((d, i) => {
     const es = byDay.get(d).sort((a, b) => a.timeInterval.start.localeCompare(b.timeInterval.start));
     return el('div', { class: 'day' },
-      el('div', { class: 'day-title' }, el('h4', {}, `${DAYS[i]} ${d}`), el('span', {}, el('button', { class: 'link', onclick: () => openCopyDayDialog(d) }, 'copy from…'), el('button', { class: 'link', onclick: () => openEntryDialog(null, d) }, '+ add'))),
+      el('div', { class: 'day-title' }, el('h4', {}, `${DAYS[i]} ${d}`), el('span', {}, el('button', { class: 'link', onclick: () => openCopyDayDialog(d) }, 'copy from…'), el('button', { class: 'link', onclick: () => openEntryDialog(null, d) }, '+ add'), el('button', { class: 'link', onclick: () => openLeaveDialog(d) }, '+ leave'))),
       es.length ? el('ul', {}, es.map(e => el('li', {}, el('button', { type: 'button', class: 'entry', onclick: () => openEntryDialog(e, d) },
         el('b', {}, `${entryHours(e)} h`), el('span', { class: 'entry-range' }, fmtRange(e)), el('span', { class: 'entry-project' }, e.project?.name || '(no project)'),
         (e.tags || []).map(t => el('span', { class: 'tag' }, t.name)),
@@ -441,6 +447,18 @@ async function clockifyMetaLoad() {
   const [projects, tags] = await Promise.all([c.projects(settings.clockify.workspaceId), c.tags(settings.clockify.workspaceId)]);
   clockifyMeta = { projects, tags };
   return clockifyMeta;
+}
+
+async function openLeaveDialog(date) {
+  if (!scopeIsCurrent()) return;
+  const saved = settings;
+  try {
+    const meta = await clockifyMetaLoad();
+    if (!scopeIsCurrent() || settings !== saved) return;
+    const c = new Clockify(saved.clockify.apiKey);
+    openLeaveEntryDialog({ settings: saved, meta, date, openSettings, isCurrent: () => scopeIsCurrent() && settings === saved,
+      onSave: async payload => { if (!scopeIsCurrent() || settings !== saved) throw Error('Settings changed. Reopen the leave entry.'); await c.createEntry(saved.clockify.workspaceId, payload); toast('Leave added in Clockify'); await loadWeek(); } });
+  } catch (error) { if (scopeIsCurrent()) toast(error.message); }
 }
 
 async function openEntryDialog(entry, dayIso) {
@@ -487,7 +505,7 @@ async function openEntryDialog(entry, dayIso) {
   const d = openDialog(isNew ? 'New Clockify entry' : 'Edit Clockify entry', el('div', { class: 'form' },
     dlgField('Project', project, 'The Clockify project. The mapping in Settings turns it into the IFS activity.'),
     el('div', { class: 'grid3' }, dlgField('Date', date, `Local, ${tz}.`), dlgField('Start', start, '24-hour, e.g. 08:30'), dlgField('End', end, hours)),
-    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Timesheets. Leave and holiday codes use General.')),
+    el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Tags'), el('div', { class: 'row' }, tagBoxes), el('small', { class: 'help' }, 'Tag meanings are configured together in Settings → Work setup. Leave and holiday codes use General.')),
     dlgField('Description', desc, 'Free text. A line “Short Name: 210701.010101.010101-B” sends the entry to that IFS activity.'),
     el('div', { class: 'actions' }, saveBtn, el('button', { onclick: () => d.close() }, 'Cancel'),
       isNew ? null : confirmButton('Delete in Clockify', async () => { try { await c.deleteEntry(ws, entry.id); d.close(); toast('Deleted in Clockify'); await loadWeek(); } catch (e) { status.textContent = e.message; } }),
@@ -510,12 +528,15 @@ function renderSettings(group, focus) {
     workspace: currentScope().workspace, getSaved: loadSettings, isCurrent: scopeIsCurrent,
     onSave: async next => {
       assertScopeCurrent();
-      saveSettings(next, { strict: true });
-      settings = next;
+      const result = await accountPreferences.save(next);
+      assertScopeCurrent();
+      settings = result.settings;
       ++clockifyConnectId;
       invalidateClockifyView();
-      toast('Settings saved');
+      toast(result.message);
+      return result;
     },
+    sickBenefitTool: renderSickBenefitTool, accountStatusPanel: () => accountPreferences?.panel(),
     openAccount, connectionStatusPanel: () => connectionStatusPanel({ showAccountLink: false }),
     getTheme: currentTheme, setTheme: applyTheme, defaults: defaultsForScope,
     exportRecords: exportCsv, backupRecords: backupJson,
@@ -533,7 +554,7 @@ function openSettings(group = 'time', focus) {
 // ---------- boot ----------
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
-  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settingsPage?.dispose(); settingsPage = null; settings = null; } });
+  const admitted = await initAuthGate({ onLock: () => { invalidateClockifyView(); ++clockifyConnectId; settingsPage?.dispose(); settingsPage = null; accountPreferences?.dispose(); accountPreferences = null; settings = null; } });
   if (!admitted) return;
   settings = loadSettings();
   const navigation = document.querySelector('.top');
@@ -541,6 +562,12 @@ async function boot() {
   const main = document.querySelector('#main-content');
   main.inert = true;
   try {
+  accountPreferences = createAccountPreferences({ workspace: currentScope().workspace, getSaved: loadSettings,
+    saveLocal: next => saveSettings(next, { strict: true }), isCurrent: scopeIsCurrent, hasDraft: () => !!settingsPage?.dirty,
+    onApplied: (next, change) => { assertScopeCurrent(); settings = next; applyTheme(next.theme || 'auto'); invalidateClockifyView();
+      if (change?.external && settingsPage) { settingsPage.dispose(); settingsPage = null; if (document.querySelector('.tabs button.active')?.dataset.tab === 'settings') renderSettings(); } } });
+  const initialSettings = await accountPreferences.start(settings, { fresh: !hasSavedSettings() });
+  assertScopeCurrent(); settings = initialSettings; applyTheme(settings.theme || 'auto');
   initShell();
   initWorkspaceUI({
     settings: () => settings,
@@ -554,8 +581,8 @@ async function boot() {
   const personal = currentScope().workspace === 'personal';
   document.querySelector('.tabs button[data-tab="week"]').hidden = personal;
   document.querySelector('.tabs button[data-tab="study"]').hidden = !personal;
-  initExpenses({ settings: () => settings, saveSettings: s => saveSettings(s), scope: currentScope, el, $, openSettings });
-  initReport({ settings: () => settings, saveSettings: s => saveSettings(s) });
+  initExpenses({ settings: () => settings, saveSettings: async s => { const result = await accountPreferences.save(s); assertScopeCurrent(); settings = result.settings; if (result.state !== 'synced') throw Error(result.message); return result; }, scope: currentScope, el, $, openSettings });
+  initReport({ settings: () => settings, saveSettings: s => saveSettings(s), openSettings });
   initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view) });
   $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
   $('#btn-bulk').addEventListener('click', openBulkDialog);

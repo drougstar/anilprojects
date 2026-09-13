@@ -1,5 +1,6 @@
+import { normalizeWorkSettings } from './work-policy.js';
 import { currentScope, scopedKey, getConnection, assertScopeCurrent } from './scope.js';
-// Settings and mapping. localStorage now; the same shape moves to Supabase in phase 2.
+// The local account/workspace copy supports offline use; account-preferences syncs saved preferences.
 const KEY = 'ifsbridge.settings.v1';
 
 // A real PROJECT_TRANS_WEEK row copied from IFS Enterprise Explorer, used as the
@@ -163,12 +164,18 @@ export function defaultsForScope() {
   return defaults;
 }
 
+export function hasSavedSettings() {
+  assertScopeCurrent();
+  try { return localStorage.getItem(scopedKey(KEY)) != null; } catch { return false; }
+}
+const prepareSettings = value => { const next = currentScope().workspace === 'work' ? normalizeWorkSettings(value) : value; next.theme ||= 'auto'; return next; };
+
 export function loadSettings() {
   assertScopeCurrent();
   const defaults = defaultsForScope();
   try {
     const raw = localStorage.getItem(scopedKey(KEY));
-    if (!raw) return defaults;
+    if (!raw) return prepareSettings(defaults);
     const s = JSON.parse(raw);
     const merged = {
       ...defaults, ...s,
@@ -193,8 +200,8 @@ export function loadSettings() {
       merged.costObjects = [...new Set([...(s.costObjects || []), ...defaults.costObjects])];
       merged.knownShortNames = [...new Set([...(s.knownShortNames || []), ...defaults.knownShortNames])];
     }
-    return merged;
-  } catch { return defaults; }
+    return prepareSettings(merged);
+  } catch { return prepareSettings(defaults); }
 }
 
 // Keep saved mapping rows, fill blanks from the built-in defaults, add rows the user does not have yet.

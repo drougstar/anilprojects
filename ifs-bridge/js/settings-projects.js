@@ -1,7 +1,7 @@
 import { el } from './dom.js';
 import { Clockify } from './clockify.js';
 import { parseCopyObjects, activityFromRecord, identityFromRecord } from './ifs.js';
-import { calculationMode, completeGeneralActivity } from './time-codes.js';
+import { completeGeneralActivity } from './time-codes.js';
 
 const field = (label, control, hint) => el('label', { class: 'field' }, el('span', {}, label), control, hint ? el('small', {}, hint) : null);
 const templateText = record => ['!IFS.COPYOBJECT', `$LU=${record.lu}`, `$VIEW=${record.view}`, '$RECORD=!', ...record.fields.map(f => `-$${f.n}:${f.name}=${f.value}`), '-'].join('\n');
@@ -31,6 +31,8 @@ export function applyCopiedProjectRow(draft, project, text, target = 'main') {
   if (project.kind === 'ignore') project.kind = 'project';
   draft.template = templateText(record);
   if (code && description) {
+    const timeType = (draft.timeTypes || []).find(item => item.code === code);
+    if (timeType) timeType.description = description;
     (draft.codeDescriptions ||= {})[code] = description;
     draft.timeCodeCatalog = [...(draft.timeCodeCatalog || []).filter(item => item.code !== code), { code, description, source: 'ifs-copy' }];
   }
@@ -41,10 +43,10 @@ export function validateProjectSettings(draft) {
   const errors = [], ids = new Set();
   for (const project of draft.mapping || []) {
     const name = project.clockifyProjectName || 'Project';
-    if (!['project', 'general', 'ignore'].includes(project.kind)) errors.push(`${name}: choose how to use this project.`);
+    if (!['project', 'general', 'break', 'ignore'].includes(project.kind)) errors.push(`${name}: choose how to use this project.`);
     if (project.clockifyProjectId) { if (ids.has(project.clockifyProjectId)) errors.push(`${name}: this Clockify project has another mapping.`); ids.add(project.clockifyProjectId); }
-    for (const key of ['regularHours', 'travelAfterHours']) { const value = project[key]; if (value != null && value !== '' && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 24)) errors.push(`${name}: hours must be between 0 and 24, or blank.`); }
-    for (const key of ['projectId', 'subProjectId', 'activityNo', 'activitySeq', 'shortName', 'clockifyProjectId']) if (/[\r\n]/.test(String(project[key] || ''))) errors.push(`${name}: activity identifiers must be on one line.`);
+    for (const key of ['regularHours']) { const value = project[key]; if (value != null && value !== '' && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 24)) errors.push(`${name}: hours must be between 0 and 24, or blank.`); }
+    for (const key of ['projectId', 'subProjectId', 'activityNo', 'activitySeq', 'shortName', 'expenseShortName', 'clockifyProjectId']) if (/[\r\n]/.test(String(project[key] || ''))) errors.push(`${name}: activity identifiers must be on one line.`);
   }
   return [...new Set(errors)];
 }
@@ -61,6 +63,7 @@ export function renderProjectSettings(draft, options = {}) {
   let filter = '', request = 0;
   const statusOf = project => {
     if (project.kind === 'ignore') return { text: 'Ignored', ready: true };
+    if (project.kind === 'break') return { text: 'Break time', ready: true };
     const complete = ['projectId', 'subProjectId', 'activityNo', 'activitySeq', 'shortName'].every(key => String(project[key] ?? '').trim());
     const matches = project.shortName === `${project.projectId}.${project.subProjectId}.${project.activityNo}`;
     if (project.kind === 'general') return { text: completeGeneralActivity(project) ? 'General ready' : 'General needs activity details', ready: completeGeneralActivity(project) };
@@ -78,22 +81,27 @@ export function renderProjectSettings(draft, options = {}) {
       const updateHeading = () => { const current = statusOf(project); const badge = heading.querySelector('.settings-readiness'); badge.textContent = current.text; badge.classList.toggle('ready', current.ready); badge.classList.toggle('pending', !current.ready); heading.querySelector('strong').textContent = project.clockifyProjectName || project.clockifyProjectId || 'Unnamed mapping'; heading.querySelector('small').textContent = project.kind === 'ignore' ? 'Left out of IFS exports' : project.shortName || 'Choose an IFS destination'; };
       const canEdit = () => alive() && details.isConnected && draft.mapping.includes(project);
       const text = (object, key, label, attrs = {}) => el('input', { value: object[key] ?? '', 'aria-label': `${name}: ${label}`, ...attrs, oninput: e => { if (!canEdit()) return; object[key] = e.target.value.trim(); changed(); updateHeading(); } });
-      const kind = el('select', { 'aria-label': `${name}: project use`, onchange: e => { if (!canEdit()) return; project.kind = e.target.value; changed(); render(); } }, [['project', 'Work project'], ['general', 'General · leave, holidays and general time'], ['ignore', 'Ignore in IFS']].map(([value, label]) => el('option', { value, selected: project.kind === value }, label)));
+      const kind = el('select', { 'aria-label': `${name}: project use`, onchange: e => { if (!canEdit()) return; project.kind = e.target.value; changed(); render(); } }, [['project', 'Work project'], ['general', 'General · leave, holidays and general time'], ['break', 'Break · exclude from pay and IFS'], ['ignore', 'Ignore in IFS']].map(([value, label]) => el('option', { value, selected: project.kind === value }, label)));
       editor.append(field('Use this project for', kind));
-      if (project.kind !== 'ignore') {
+      if (!['ignore', 'break'].includes(project.kind)) {
         const importTarget = el('select', { 'aria-label': `${name}: import destination` }, el('option', { value: 'main' }, 'Main activity'), el('option', { value: 'travel' }, 'Travel activity'));
         const pasted = el('textarea', { rows: '4', placeholder: 'In IFS select one activity row → Copy Object, then paste it here.', 'aria-label': `${name}: copied IFS row` });
         const importStatus = el('p', { class: 'help', role: 'status' });
-        editor.append(el('div', { class: 'settings-project-import' }, el('h5', {}, 'Connect this project with one copied IFS row'), el('p', { class: 'help' }, 'The row fills the activity details and refreshes your employee fields and export template.'), field('Put this row into', importTarget), pasted,
+        editor.append(el('details', { class: 'settings-project-import settings-subdetails' }, el('summary', {}, 'Copy activity details from IFS'), el('p', { class: 'help' }, 'The row fills the activity details and refreshes your employee fields and export template.'), field('Put this row into', importTarget), pasted,
           el('button', { class: 'project-import-row', onclick: () => { if (!canEdit()) return; try { const result = applyCopiedProjectRow(draft, project, pasted.value, importTarget.value); changed(); if (result.catalogUpdated) options.onImportCatalog?.(); status.textContent = `${name}: ${result.target === 'travel' ? 'travel' : 'main'} activity ${result.shortName} added to your draft. Save settings to keep it.`; openProjects.add(project); render(); } catch (error) { importStatus.textContent = error.message; } } }, 'Use this IFS row'), importStatus));
         editor.append(field('Main IFS short name', text(project, 'shortName', 'main short name'), 'Project.subproject.activity — copied from IFS above.'));
-        if (calculationMode(draft) === 'rules') editor.append(el('div', { class: 'grid2' }, field('Regular hours for this project', text(project, 'regularHours', 'regular hours', { type: 'number', min: '0', max: '24', step: '0.5', placeholder: `Default: ${draft.regularHours ?? 9}` }), 'Blank keeps the shared daily hours.'), field('Travel overtime after', text(project, 'travelAfterHours', 'travel threshold', { type: 'number', min: '0', max: '24', step: '0.5', placeholder: `Default: ${draft.travelAfterHours ?? 9}` }), 'Blank keeps the shared travel threshold.')));
-        const advanced = el('details', { class: 'settings-subdetails' }, el('summary', {}, 'Advanced activity fields'));
+        const schedule = el('details', { class: 'settings-subdetails' }, el('summary', {}, 'Working hours at this location'),
+          field('Overtime starts after', text(project, 'regularHours', 'regular hours', { type: 'number', min: '0.5', max: '24', step: '0.5', placeholder: `Default: ${draft.workPolicy?.overtimeAfterHours ?? 9}` }), 'One threshold for work and travel. Blank uses the shared schedule.'),
+          el('label', { class: 'settings-inline-check' }, el('input', { type: 'checkbox', checked: project.breakCountsTowardThreshold === true, 'aria-label': `${name}: count marked breaks`, onchange: e => { if (!canEdit()) return; project.breakCountsTowardThreshold = e.target.checked; changed(); } }), 'Count explicitly marked break time toward this location’s overtime threshold'));
+        editor.append(schedule,
+          el('details', { class: 'settings-subdetails' }, el('summary', {}, 'Expense destination'),
+            field('IFS expense short name', text(project, 'expenseShortName', 'expense short name'), 'The destination used by expenses for this project. Blank uses the default activity suffix.')));
+        const advanced = el('details', { class: 'settings-subdetails' }, el('summary', {}, 'Time destinations · main and travel'));
         advanced.append(el('div', { class: 'grid3' }, field('IFS project ID', text(project, 'projectId', 'IFS project ID')), field('Subproject ID', text(project, 'subProjectId', 'subproject ID')), field('Activity number', text(project, 'activityNo', 'activity number')), field('Activity sequence', text(project, 'activitySeq', 'activity sequence')), field('IFS project name', text(project, 'projectName', 'IFS project name')), field('Activity description', text(project, 'activityDesc', 'activity description')), field('Subproject description', text(project, 'subProjectDesc', 'subproject description'))));
         const travel = project.travel || {};
         // Do not add an empty travel object merely by opening Settings.
         const travelInput = (key, label) => el('input', { value: travel[key] || '', 'aria-label': `${name}: ${label}`, oninput: e => { if (!canEdit()) return; (project.travel ||= {})[key] = e.target.value.trim(); changed(); updateHeading(); } });
-        advanced.append(el('h5', {}, 'Travel activity'), el('div', { class: 'grid2' }, field('Travel short name', travelInput('shortName', 'travel short name')), field('Travel activity number', travelInput('activityNo', 'travel activity number')), field('Travel activity sequence', travelInput('activitySeq', 'travel activity sequence')), field('Travel description', travelInput('activityDesc', 'travel description'))));
+        advanced.append(el('div', { class: 'grid2' }, field('Travel short name', travelInput('shortName', 'travel short name')), field('Travel activity number', travelInput('activityNo', 'travel activity number')), field('Travel activity sequence', travelInput('activitySeq', 'travel activity sequence')), field('Travel description', travelInput('activityDesc', 'travel description'))));
         editor.append(advanced);
       }
       editor.append(el('details', { class: 'settings-subdetails' }, el('summary', {}, 'Clockify identifier and removal'), field('Clockify project ID', text(project, 'clockifyProjectId', 'Clockify project ID')), field('Clockify project name', text(project, 'clockifyProjectName', 'Clockify project name')),
@@ -131,7 +139,7 @@ export function renderProjectSettings(draft, options = {}) {
     finally { if (alive()) read.disabled = false; }
   } }, 'Read projects from Clockify');
   const search = el('input', { type: 'search', placeholder: 'Find a project', 'aria-label': 'Find a project', oninput: e => { if (!alive()) return; filter = e.target.value.trim().toLowerCase(); render(); } });
-  element.append(el('p', { class: 'help' }, 'Connect each Clockify project to its IFS activity. Choose General for the destination used by leave and holidays.'), el('div', { class: 'settings-project-toolbar' }, search, read), status, list);
+  element.append(el('p', { class: 'help' }, 'Each project owns its working hours and both IFS destinations. General receives leave and weekday remainders. Mark a break project explicitly; General is not a break.'), el('div', { class: 'settings-project-toolbar' }, search, read), status, list);
   function validate() {
     return validateProjectSettings(draft);
   }

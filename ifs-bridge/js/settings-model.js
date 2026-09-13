@@ -1,7 +1,8 @@
-import { effectiveTimeCodeMappings, calculationMode } from './time-codes.js';
+import { normalizeWorkSettings } from './work-policy.js';
 
 const clone = value => structuredClone(value);
 const labels = {
+  theme: 'Appearance', workPolicy: 'Hours and schedule', timeTypes: 'Time types and pay', workPolicyMigrationWarnings: 'Previous settings needing review',
   clockify: 'Clockify connection', identity: 'IFS identity', timeZone: 'Time zone',
   timeCalculationMode: 'How time codes are chosen', regularHours: 'Regular hours', travelAfterHours: 'Travel threshold',
   topUpMinimum: 'Minimum day', roundStep: 'Rounding step', roundMode: 'Rounding direction', holidays: 'Holiday dates',
@@ -13,18 +14,14 @@ const labels = {
   homeCurrency: 'Home currency', rateSource: 'Exchange-rate source', tcmbField: 'Exchange-rate column', currRateMode: 'Missing-rate behavior',
   payRate: 'Hourly pay', payCurrency: 'Pay currency', restDaysPaid: 'Paid rest days', restDayHours: 'Rest-day hours', payMinDay: 'Pay day minimum'
 };
-const omitted = new Set(['supabase', 'timeCodeMappingsVersion', 'settingsListsVersion', 'tags']);
+const omitted = new Set(['supabase', 'timeCodeMappingsVersion', 'settingsListsVersion', 'tags', 'workPolicyVersion']);
 const stable = value => JSON.stringify(value && !Array.isArray(value) && typeof value === 'object'
   ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, JSON.parse(stable(item) ?? 'null')])) : value);
 
 export function settingsDraft(saved, workspace = 'work') {
-  const draft = clone(saved);
+  const draft = workspace === 'work' ? normalizeWorkSettings(saved) : clone(saved);
   draft.settingsListsVersion = 2;
-  if (workspace === 'work') {
-    draft.timeCodeMappings = effectiveTimeCodeMappings(draft);
-    draft.timeCodeMappingsVersion = 2;
-    draft.timeCalculationMode = calculationMode(draft);
-  }
+  draft.theme ||= 'auto';
   return draft;
 }
 
@@ -79,7 +76,7 @@ export function validateStructuredSettings(s, workspace = 'work') {
       if (typeof item.rate !== 'number' || decimalSetting(item.rate) == null) errors.push(`Per diem ${i + 1}: enter an amount such as 70.50 or 70,50.`);
       if (!/^[A-Z]{3}$/.test(item.currency)) errors.push(`Per diem ${i + 1}: choose a currency.`);
     }
-    for (const key of ['costObjects', 'knownShortNames']) if ((s[key] || []).some(value => !value.trim()) || new Set(s[key] || []).size !== (s[key] || []).length) errors.push(`${labels[key]}: remove blank or duplicate rows.`);
+    for (const key of ['costObjects']) if ((s[key] || []).some(value => !value.trim()) || new Set(s[key] || []).size !== (s[key] || []).length) errors.push(`${labels[key]}: remove blank or duplicate rows.`);
   }
   return errors;
 }

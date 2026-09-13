@@ -7,6 +7,7 @@ import { el, $, download, toast } from './dom.js';
 import { Clockify } from './clockify.js';
 import { buildWeek, fetchWindow, mondayOf } from './rules.js';
 import { effectiveTimeCodeMappings, calculationMode, timeCodeInfo } from './time-codes.js';
+import { typePolicy, DEFAULT_WORK_POLICY } from './work-policy.js';
 
 let ctx = null;
 let renderId = 0;
@@ -21,6 +22,7 @@ function monthDays(ym) {
 const shift = (iso, n) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); };
 
 function hoursRulesKey(s) {
+  if (s.workPolicyVersion === 1) return JSON.stringify([4, s.workPolicy, s.timeTypes, s.timeZone, s.roundStep, s.roundMode, s.holidays, s.travelKeyword, s.mapping, s.timeCodeMappingsVersion, effectiveTimeCodeMappings(s), s.clockify?.workspaceId, s.clockify?.userId]);
   const keys = ['timeZone', 'regularHours', 'travelAfterHours', 'topUpMinimum', 'roundStep', 'roundMode', 'holidays', 'travelKeyword', 'codes', 'mapping'];
   // v3 distinguishes actual Work tag hours from General-only codes and records
   // the effective unified mapping, including legacy settings only when in use.
@@ -28,19 +30,19 @@ function hoursRulesKey(s) {
     s.clockify?.workspaceId || '', s.clockify?.userId || '', effectiveTimeCodeMappings(s),
     ...(s.timeCodeMappingsVersion === 2 ? [] : [s.tags ?? null]), ...keys.map(key => s[key] ?? null)]);
 }
-const hoursCurrent = (rec, s) => rec?.version === 3 && rec.rulesKey === hoursRulesKey(s);
+const hoursCurrent = (rec, s) => rec?.version === (s.workPolicyVersion === 1 ? 4 : 3) && rec.rulesKey === hoursRulesKey(s);
 const roundHours = value => Math.round(value * 100) / 100;
 const timeKindOf = row => row.timeKind || timeCodeInfo(row.code)?.scope || 'general-only';
 const multiplierOf = row => row.payMultiplier ?? timeCodeInfo(row.code)?.payMultiplier ?? null;
 function workHoursByCode(rec) {
   if (rec.workByCode) return rec.workByCode;
   const totals = { ...(rec.ordinaryByCode || rec.byCode || {}) };
-  for (const row of rec.directRows || []) if (timeKindOf(row) === 'work') totals[row.code] = roundHours((totals[row.code] || 0) + row.hours);
+  for (const row of rec.directRows || []) if (timeKindOf(row) === 'work' && row.source !== 'added-general') totals[row.code] = roundHours((totals[row.code] || 0) + row.hours);
   return totals;
 }
 const codeHours = (totals, codes) => roundHours([...new Set(codes.filter(Boolean))].reduce((sum, code) => sum + (totals[code] || 0), 0));
 function workBreakdown(rec, s) {
-  const totals = workHoursByCode(rec), codes = s.codes || {};
+  const totals = workHoursByCode(rec), codes = s.workPolicyVersion === 1 ? {} : (s.codes || {});
   return { totals, regular: codeHours(totals, [codes.regular, 'F_03']),
     overtime: codeHours(totals, [codes.ot15, codes.ot2, 'F_02', 'F_10', 'F_11']),
     travel: codeHours(totals, [codes.travelRegular, codes.travel, 'F_01', 'F_12']) };
@@ -66,9 +68,9 @@ async function fetchMonthHours(ym) {
       if (h > 0 && d >= first && d <= last) {
         byCode[r.code] = Math.round(((byCode[r.code] || 0) + h) * 100) / 100;
         if (r.directCode) {
-          const timeKind = timeKindOf(r), payMultiplier = multiplierOf(r);
-          const key = `${r.code}|${timeKind}|${payMultiplier ?? 'unknown'}`;
-          const direct = directByKey.get(key) || { code: r.code, description: r.description || '', timeKind, payMultiplier, hours: 0 };
+          const timeKind = timeKindOf(r), payMultiplier = s.workPolicyVersion === 1 ? typePolicy(s, r.code)?.payMultiplier ?? null : multiplierOf(r);
+          const key = `${r.code}|${timeKind}|${payMultiplier ?? 'unknown'}|${r.source || ''}`;
+          const direct = directByKey.get(key) || { code: r.code, description: r.description || '', timeKind, payMultiplier, source: r.source || 'recorded', hours: 0 };
           direct.hours = Math.round((direct.hours + h) * 100) / 100; directByKey.set(key, direct);
         } else ordinaryByCode[r.code] = Math.round(((ordinaryByCode[r.code] || 0) + h) * 100) / 100;
         const a = r.mapping.shortName || r.mapping.clockifyProjectName;
@@ -79,10 +81,14 @@ async function fetchMonthHours(ym) {
         else if (r.code === s.codes.regular) day.regular = Math.round((day.regular + h) * 100) / 100;
       }
     });
+    if (s.workPolicyVersion === 1) for (const [date, facts] of Object.entries(w.dayFacts || {})) {
+      if (date < first || date > last || facts.recorded <= 0) continue;
+      byDay[date] = { ...(byDay[date] || {}), ...facts, weekday: new Date(date + 'T00:00:00Z').getUTCDay() % 6 !== 0 };
+    }
   }
   const total = Math.round(Object.values(byCode).reduce((a, b) => a + b, 0) * 100) / 100;
   checkCurrent();
-  const rec = { version: 3, rulesKey, month: ym, fetchedAt: new Date().toISOString(), byCode, ordinaryByCode, directRows: [...directByKey.values()], byActivity, byDay, total, days: Object.keys(byDay).length };
+  const rec = { version: s.workPolicyVersion === 1 ? 4 : 3, rulesKey, month: ym, fetchedAt: new Date().toISOString(), byCode, ordinaryByCode, directRows: [...directByKey.values()], byActivity, byDay, total, days: Object.keys(byDay).length };
   rec.workByCode = workHoursByCode(rec);
   await db.setMeta(`hours.${ym}`, rec);
   return rec;
@@ -104,6 +110,7 @@ function restDays(ym, s, byDay = {}) {
 }
 
 function payFor(rec, s) {
+  if (s.workPolicyVersion === 1) return unifiedPayFor(rec, s);
   const rate = Number(s.payRate) || 0, tagMode = calculationMode(s) === 'tags';
   const codes = s.codes || {};
   const mult = { [codes.regular]: 1, [codes.ot15]: 1.5, [codes.ot2]: 2, [codes.travelRegular]: 1, [codes.travel]: 1 };
@@ -135,7 +142,7 @@ function payFor(rec, s) {
     unknownHours, partial: unknownHours > 0, paidHours, amount: roundHours(rows.reduce((a, r) => a + (r.amount ?? 0), 0)), needsReload: !hoursCurrent(rec, s) };
 }
 async function renderHours(root, ym, allMonths) {
-  const s = ctx.settings(), tagMode = calculationMode(s) === 'tags';
+  const s = ctx.settings(), unified = s.workPolicyVersion === 1, tagMode = !unified && calculationMode(s) === 'tags';
   const host = el('section', { class: 'ov-section' });
   root.append(host);
   const body = el('div');
@@ -147,7 +154,7 @@ async function renderHours(root, ym, allMonths) {
     for (const m of months) { const r = await db.meta(`hours.${m}`); if (r && hoursCurrent(r, s)) recs.push(r); else if (r) outdated++; }
     if (ym) {
       const rec = recs[0];
-      if (!rec) { body.append(el('p', { class: 'muted' }, outdated ? 'Time settings changed. Load hours again with the current calculation mode and tag mappings.' : 'Not loaded yet for this month.')); return; }
+      if (!rec) { body.append(el('p', { class: 'muted' }, outdated ? 'Time settings changed. Load hours again with the current work policy and tag meanings.' : 'Not loaded yet for this month.')); return; }
       const pay = payFor(rec, s), work = workBreakdown(rec, s);
       body.append(
         el('div', { class: 'ov-cards' },
@@ -155,14 +162,16 @@ async function renderHours(root, ym, allMonths) {
           pay.generalHours ? card('General time', `${pay.generalHours} h`, pay.partial ? `${pay.unknownHours} h have no confirmed pay multiplier` : 'General-only codes, separate from work') : null,
           card('Overtime', `${work.overtime} h`, 'Includes recorded overtime at ×1, ×1.5 and ×2'),
           card('Travel', `${work.travel} h`, 'Recorded travel codes'),
-          tagMode ? null : card('Day minimum', `${pay.topUp} h`, pay.topUp ? `${pay.topUpDays} day${pay.topUpDays === 1 ? '' : 's'} below ${s.payMinDay ?? 9} h topped up` : 'No addition; direct-code days are excluded'),
+          unified ? card('Added as General', `${pay.addedGeneralHours} h`, 'Weekday remainder, already included in IFS and pay') : tagMode ? null : card('Day minimum', `${pay.topUp} h`, pay.topUp ? `${pay.topUpDays} day${pay.topUpDays === 1 ? '' : 's'} below ${s.payMinDay ?? 9} h topped up` : 'No addition; direct-code days are excluded'),
           tagMode ? null : card('Rest days', `${pay.rest.hours} h`, pay.rest.hours ? `${pay.rest.sundays} Sunday${pay.rest.sundays === 1 ? '' : 's'}${pay.rest.holidays ? ` + ${pay.rest.holidays} holiday${pay.rest.holidays === 1 ? '' : 's'}` : ''} × ${pay.rest.perDay} h, paid` : 'not counted'),
           card(pay.partial ? 'Known paid hours' : 'Paid hours', `${pay.paidHours} h`, pay.partial ? `Excludes ${pay.unknownHours} h with unknown pay` : 'Hours with a confirmed positive multiplier'),
-          card(pay.partial ? 'Partial pay estimate' : 'Pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', pay.partial ? `Excludes ${pay.unknownHours} h until their pay multiplier is confirmed` : s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'set the rate in Settings')),
+          card(pay.partial ? 'Partial employer-pay estimate' : 'Employer-pay estimate', s.payRate ? fmtMoney(pay.amount, s.payCurrency) : '—', pay.partial ? `Excludes ${pay.unknownHours} h until their pay multiplier is confirmed` : s.payRate ? `at ${fmtMoney(s.payRate, s.payCurrency)} per hour` : 'set the rate in Settings')),
         table(['Code', 'Description', 'Hours', '× rate', 'Amount'], pay.rows.map(r => [r.code, r.desc, String(r.hours), r.mult == null ? 'Unknown' : `× ${r.mult}`, r.amount == null ? 'Unknown' : s.payRate ? fmtMoney(r.amount, s.payCurrency) : '—'])),
+        unified && pay.sickHours > 0 ? el('p', { class: 'help' }, 'SGK sickness benefits are separate and not included in this employer-pay estimate. ', ctx.openSettings ? el('button', { type: 'button', onclick: () => ctx.openSettings('time', 'time-type-F_06') }, 'Sick-leave policy & SGK estimate') : '') : null,
+        unified && pay.payWarnings.length ? el('p', { class: 'help' }, pay.payWarnings.join(' ')) : null,
         pay.rest.excluded ? el('p', { class: 'help' }, `${pay.rest.excluded} rest/holiday date${pay.rest.excluded === 1 ? '' : 's'} with direct-code entries excluded from automatic rest pay to avoid counting the same day twice.`) : null,
         el('details', { class: 'more-opts' }, el('summary', {}, 'By activity'), table(['Activity', 'Hours'], Object.entries(rec.byActivity).sort().map(([a, h]) => [a, String(h)]))),
-        el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify. ${tagMode ? 'Tag mode uses recorded hours and confirmed codes; no daily minimum or automatic rest-day pay is added.' : 'Calculated with the Week tab rules. The table shows each code’s pay multiplier.'}`));
+        el('small', { class: 'help' }, `Loaded ${fmtWhen(rec.fetchedAt)} from Clockify. ${unified ? 'Recorded hours, added General time and paid Sundays are counted once. Confirmed tags override the schedule with a warning.' : tagMode ? 'Tag mode uses recorded hours and confirmed codes; no daily minimum or automatic rest-day pay is added.' : 'Calculated with the Week tab rules. The table shows each code’s pay multiplier.'}`));
     } else {
       if (!recs.length) { body.append(el('p', { class: 'muted' }, outdated ? 'Time settings changed. Pick a month and load its hours again.' : 'No month loaded yet. Pick a month above and press Load hours.')); return; }
       const totals = { worked: 0, general: 0, regular: 0, overtime: 0, travel: 0, rest: 0, paid: 0, amount: 0, partial: false };
@@ -178,13 +187,13 @@ async function renderHours(root, ym, allMonths) {
       const totalRow = ['Total', ...['worked', 'general', 'regular', 'overtime', 'travel'].map(key => String(roundHours(totals[key]))),
         ...(tagMode ? [] : [String(roundHours(totals.rest))]), String(roundHours(totals.paid)) + (totals.partial ? ' + unknown' : ''),
         (s.payRate ? fmtMoney(roundHours(totals.amount), s.payCurrency) : '—') + (totals.partial ? ' (partial)' : '')];
-      body.append(table(['Month', 'Worked', 'General time', 'Regular', 'Overtime', 'Travel', ...(tagMode ? [] : ['Rest days']), 'Known paid hours', 'Pay estimate'], [...rows, totalRow]),
+      body.append(table(['Month', 'Worked', 'General time', 'Regular', 'Overtime', 'Travel', ...(tagMode ? [] : ['Rest days']), 'Known paid hours', 'Employer-pay estimate'], [...rows, totalRow]),
         el('small', { class: 'help' }, `${recs.length} month${recs.length === 1 ? '' : 's'} loaded.${outdated ? ` ${outdated} old month${outdated === 1 ? '' : 's'} omitted until reloaded with the current settings.` : ''} Months are loaded one at a time: pick one above and press Load hours.`));
     }
   };
   const loadBtn = el('button', { class: 'primary', disabled: !ym, onclick: async () => { loadBtn.disabled = true; status.textContent = 'Loading from Clockify…'; try { await fetchMonthHours(ym); status.textContent = ''; await paint(); } catch (e) { status.textContent = e.message; } loadBtn.disabled = false; } }, ym ? 'Load hours' : 'Pick a month to load');
-  const payHelp = s.payRate ? `Pay estimate at ${fmtMoney(s.payRate, s.payCurrency)} per hour${tagMode ? ', using recorded hours only.' : `, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'not counted' : (s.restDayHours ?? 7.5) + ' h each'} (Settings → Pay).`}` :
-    'For a pay estimate, set the hourly rate under Settings → Pay.';
+  const payHelp = unified ? (s.payRate ? `Employer-pay estimate at ${fmtMoney(s.payRate, s.payCurrency)} per hour. Time-type pay and the work schedule share one setup in Settings → Work setup. SGK sickness benefits are estimated separately.` : 'Set your hourly pay rate in Settings → Work setup → Time types & pay. SGK sickness benefits are calculated separately.') : s.payRate ? `Pay estimate at ${fmtMoney(s.payRate, s.payCurrency)} per hour${tagMode ? ', using recorded hours only.' : `, day minimum ${s.payMinDay ?? 9} h, rest days ${s.restDaysPaid === false ? 'not counted' : (s.restDayHours ?? 7.5) + ' h each'} (Settings → Work setup → Time types & pay).`}` :
+    'For a pay estimate, set the hourly rate under Settings → Work setup → Time types & pay.';
   host.append(el('div', { class: 'section-head' }, el('h4', {}, 'Working hours' + (ym ? ` · ${monthLabel(ym)}` : '')), loadBtn), el('small', { class: 'help' }, payHelp), status, body);
   await paint();
 }
@@ -296,3 +305,44 @@ function exportMonth(ls, sheets, trips, codeOf) {
   download(`overview-${state.month || 'all'}.csv`, '﻿' + rows.map(r => r.map(esc).join(';')).join('\r\n'), 'text/csv');
 }
 
+
+// Classified IFS rows already include the weekday remainder. Never add another
+// pay minimum here. Calendar Sunday pay is a separate, explicitly chosen benefit.
+function unifiedPayFor(rec, settings) {
+  const p = { ...DEFAULT_WORK_POLICY, ...(settings.workPolicy || {}) }, rate = Number(settings.payRate) || 0;
+  const source = rec.directRows?.length ? rec.directRows : Object.entries(rec.byCode || {}).map(([code, hours]) => ({ code, hours, source: 'recorded' }));
+  const rows = source.map(row => {
+    const type = typePolicy(settings, row.code), multiplier = type?.payMultiplier ?? null;
+    return { code: row.code, desc: type?.description || row.description || '', hours: row.hours, mult: multiplier, source: row.source || 'recorded', timeKind: type?.scope || row.timeKind, amount: multiplier === null ? null : roundHours(row.hours * rate * multiplier) };
+  });
+  const payWarnings = [], { first, last } = monthDays(rec.month);
+  let sundayHours = 0, holidayHours = 0, sundays = 0, holidays = 0, excluded = 0, unresolvedSundayHours = 0;
+  for (let date = first; date <= last; date = shift(date, 1)) {
+    const dow = new Date(date + 'T00:00:00Z').getUTCDay(), day = rec.byDay?.[date] || {};
+    if (dow === 0) {
+      const worked = day.work > 0;
+      if (worked && p.sundayPayMode === 'unconfirmed') unresolvedSundayHours += p.sundayPaidHours;
+      else if (!worked || p.sundayPayMode === 'plus-work') { sundayHours += p.sundayPaidHours; sundays++; }
+      else excluded++;
+    } else if ((settings.holidays || []).includes(date) && p.holidayPaidHours !== null) {
+      // Explicit General holiday leave already carries its pay in the rows.
+      if (day.absence > 0) { excluded++; continue; }
+      holidayHours += p.holidayPaidHours; holidays++;
+    }
+  }
+  if (sundayHours > 0) rows.push({ code: 'Sunday', desc: `${sundays} paid Sundays × ${p.sundayPaidHours} h${p.sundayPayMode === 'plus-work' ? ', in addition to worked hours' : ''}`, hours: roundHours(sundayHours), mult: 1, amount: roundHours(sundayHours * rate), source: 'calendar' });
+  if (holidayHours > 0) rows.push({ code: 'Holiday', desc: `${holidays} configured public holidays × ${p.holidayPaidHours} h`, hours: roundHours(holidayHours), mult: 1, amount: roundHours(holidayHours * rate), source: 'calendar' });
+  if (unresolvedSundayHours > 0) { rows.push({ code: 'Sunday?', desc: 'Confirm whether Sunday base pay is added when you work', hours: roundHours(unresolvedSundayHours), mult: null, amount: null, source: 'calendar' }); payWarnings.push('The Sunday base-pay treatment on worked Sundays is unconfirmed.'); }
+  if (p.holidayPaidHours === null && (settings.holidays || []).some(date => date >= first && date <= last && !(rec.byDay?.[date]?.absence > 0))) payWarnings.push('Automatic public-holiday base pay is not configured; only explicitly recorded holiday leave is included.');
+  const sum = filter => roundHours(rows.filter(filter).reduce((total, row) => total + row.hours, 0));
+  const worked = sum(row => row.source === 'recorded' && row.timeKind === 'work');
+  const generalHours = sum(row => row.source === 'recorded' && row.timeKind === 'general-only');
+  const addedGeneralHours = sum(row => row.source === 'added-general');
+  const unknownHours = sum(row => row.amount === null), sickHours = sum(row => row.code === 'F_06');
+  const workByCode = {};
+  for (const row of rows) if (row.source === 'recorded' && row.timeKind === 'work') workByCode[row.code] = roundHours((workByCode[row.code] || 0) + row.hours);
+  const recordedHours = roundHours(Object.values(rec.byDay || {}).reduce((total, day) => total + (day.recorded ?? ((day.work || 0) + (day.absence || 0))), 0)) || roundHours(worked + generalHours);
+  return { rows, worked, generalHours, addedGeneralHours, recordedHours, ifsHours: rec.total, workByCode, directHours: roundHours(worked + generalHours), topUp: 0, topUpDays: 0,
+    rest: { hours: roundHours(sundayHours + holidayHours), sundays, holidays, excluded, perDay: p.sundayPaidHours }, sickHours, payWarnings, unknownHours, partial: unknownHours > 0,
+    paidHours: sum(row => row.mult > 0), amount: roundHours(rows.reduce((total, row) => total + (row.amount ?? 0), 0)), needsReload: !hoursCurrent(rec, settings) };
+}

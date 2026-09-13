@@ -14,6 +14,7 @@
 //    travel inside the threshold is travel regular time (F_01). Tag "Travel OT" forces F_12.
 
 import { effectiveTimeCodeMappings, calculationMode, timeCodeInfo, completeGeneralActivity } from './time-codes.js';
+import { typePolicy, DEFAULT_WORK_POLICY } from './work-policy.js';
 
 export const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -133,10 +134,20 @@ export function timeCodeOf(entry, settings, rules = effectiveTimeCodeMappings(se
     if (!rule.confirmed || !['code', 'label'].includes(rule.mode)) return { error: `Clockify tag "${tag.name || tag.id}" has not been confirmed. Review its time-code mapping in Settings.` };
     if (rule.mode === 'label') continue;
     if (!timeCodeInfo(rule.code)) return { error: `Clockify tag "${tag.name || tag.id}" needs a supported IFS report code before exporting. Review its mapping in Settings.` };
-    if (rule.payMultiplier != null && (!Number.isFinite(rule.payMultiplier) || rule.payMultiplier < 0 || rule.payMultiplier > 10)) return { error: `Clockify tag "${tag.name || tag.id}" has an invalid pay multiplier.` };
+    if (settings.workPolicyVersion !== 1 && rule.payMultiplier != null && (!Number.isFinite(rule.payMultiplier) || rule.payMultiplier < 0 || rule.payMultiplier > 10)) return { error: `Clockify tag "${tag.name || tag.id}" has an invalid pay multiplier.` };
     matched.push(rule);
   }
-  if (new Set(matched.map(rule => `${rule.code}|${rule.payMultiplier ?? timeCodeInfo(rule.code)?.payMultiplier ?? 'unknown'}`)).size > 1) return { error: 'An entry has conflicting IFS time codes. Keep one intended code before exporting.' };
+  if (new Set(matched.map(rule => settings.workPolicyVersion === 1 ? rule.code : `${rule.code}|${rule.payMultiplier ?? timeCodeInfo(rule.code)?.payMultiplier ?? 'unknown'}`)).size > 1) return { error: 'An entry has conflicting IFS time codes. Keep one intended code before exporting.' };
+  if (settings.workPolicyVersion === 1) {
+    const rule = matched[0];
+    if (rule) {
+      const info = typePolicy(settings, rule.code), travel = ['F_01', 'F_12'].includes(rule.code);
+      return { directCode: true, timeKind: info.scope, code: rule.code, description: info.description, payMultiplier: info.payMultiplier, travel, travelClass: travel ? (rule.code === 'F_12' ? 'travelOT' : 'travel') : 'none', ot: 'none' };
+    }
+    const keyword = String(settings.travelKeyword || '').trim();
+    const travel = keyword && (entry.description || '').trim().toLocaleLowerCase().startsWith(keyword.toLocaleLowerCase()) && !/[\p{L}\p{N}]/u.test((entry.description || '').trim()[keyword.length] || '');
+    return { ot: 'none', travel: !!travel, travelClass: travel ? 'travel' : 'none' };
+  }
   const rule = matched[0], codes = settings.codes || {}, tagsOnly = calculationMode(settings) === 'tags';
   if (!rule && !tagsOnly) {
     const travelClass = settings.travelKeyword && new RegExp(`^\\s*${settings.travelKeyword}\\b`, 'i').test(entry.description || '') ? 'travel' : 'none';
@@ -157,6 +168,7 @@ export function timeCodeOf(entry, settings, rules = effectiveTimeCodeMappings(se
 }
 
 export function buildWeek(entries, mondayIso, settings, mapping) {
+  if (settings.workPolicyVersion === 1) return buildUnifiedWeek(entries, mondayIso, settings, mapping);
   const tz = settings.timeZone;
   const dates = weekDates(mondayIso);
   const dayIndex = new Map(dates.map((d, i) => [d, i]));
@@ -328,4 +340,116 @@ const round2 = n => Math.round(n * 100) / 100;
 function dedupe(ws) {
   const seen = new Set();
   return ws.filter(w => { const k = w.level + w.text; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
+// Unified policy: chronology decides automatic codes, confirmed tags override
+// those codes, and the weekday remainder is a separate General row.
+function buildUnifiedWeek(entries, mondayIso, settings, mapping = []) {
+  const policy = { ...DEFAULT_WORK_POLICY, ...(settings.workPolicy || {}) }, dates = weekDates(mondayIso);
+  const holidays = new Set(settings.holidays || []), warnings = [], segments = [], rows = new Map();
+  const byId = new Map(mapping.map(m => [m.clockifyProjectId, m])), tagRules = effectiveTimeCodeMappings(settings);
+  const generalTargets = [...new Map(mapping.filter(completeGeneralActivity).map(m => [m.shortName + '|' + m.activitySeq, m])).values()];
+  const dayFacts = Object.fromEntries(dates.map(date => [date, { recorded: 0, work: 0, absence: 0, addedGeneral: 0, unpaid: 0, total: 0 }]));
+  let blocked = false;
+  const problem = text => { blocked = true; warnings.push({ level: 'error', text }); };
+  const generalFor = (base, date) => {
+    if (base?.kind === 'general') {
+      if (completeGeneralActivity(base)) return base;
+      problem(`${date}: the General destination is incomplete. Set its project, subproject, activity, short name and activity sequence.`); return null;
+    }
+    if (generalTargets.length === 1) return generalTargets[0];
+    problem(`${date}: choose one complete General destination for leave and remaining daily hours.`); return null;
+  };
+  const put = (target, code, day, hours, source = 'recorded', directCode = false) => {
+    if (!(hours > 0) || !target) return;
+    const info = typePolicy(settings, code);
+    if (!info) { problem(`Unsupported IFS code ${code}.`); return; }
+    if (info.scope === 'general-only' && !completeGeneralActivity(target)) { problem(`${code} requires a complete General destination.`); return; }
+    if (!target.activitySeq || !target.shortName || !target.projectId || !target.subProjectId || !target.activityNo) { problem(`${target.clockifyProjectName || target.shortName}: complete the IFS activity destination before exporting.`); return; }
+    const key = `${target.shortName}|${target.activitySeq}|${code}|${source}`;
+    if (!rows.has(key)) rows.set(key, { mapping: target, code, description: info.description, directCode: true, tagged: directCode, timeKind: info.scope, payMultiplier: info.payMultiplier, source, hours: Array(7).fill(0), total: 0 });
+    const row = rows.get(key); row.hours[day] += hours; row.total += hours;
+  };
+  for (const entry of entries) {
+    if (!entry.timeInterval?.end) { warnings.push({ level: 'warn', text: `Running timer ignored: "${entry.description || ''}".` }); continue; }
+    const split = splitEntry(entry, settings.timeZone || 'UTC').filter(part => dates.includes(part.date));
+    if (!split.length) continue;
+    const base = byId.get(entry.projectId || '');
+    if (base?.kind === 'ignore') { warnings.push({ level: 'info', text: `"${base.clockifyProjectName}" ignored, as configured.` }); continue; }
+    if (!base) { problem(`Clockify project "${entry.project?.name || entry.projectId || '(no project)'}" is not mapped to an IFS activity.`); continue; }
+    const classification = timeCodeOf(entry, settings, tagRules);
+    if (classification.error) { problem(classification.error); continue; }
+    const shortName = (SHORT_NAME_RE.exec(entry.description || '') || [])[1] || '';
+    let target = base;
+    if (shortName) {
+      target = mapping.find(m => m.shortName === shortName);
+      if (!target) {
+        const travel = mapping.find(m => m.travel?.shortName === shortName);
+        if (travel) target = { ...travel, ...travel.travel };
+      }
+      if (!target || target.kind === 'ignore') { problem(`Short Name ${shortName} needs a complete, enabled IFS activity mapping.`); continue; }
+    } else if (classification.travel && base.kind !== 'general') {
+      if (base.travel?.shortName) target = { ...base, ...base.travel };
+      else warnings.push({ level: 'warn', text: `${base.clockifyProjectName}: travel uses the main activity because no travel destination is configured.` });
+    }
+    for (const part of split) segments.push({ ...part, day: dates.indexOf(part.date), hours: part.minutes / 60, projectId: entry.projectId, projectName: base.clockifyProjectName, base, target, ...classification, isBreak: entry.isBreak === true || base.kind === 'break', title: (entry.description || '').split(/\r?\n/)[0], entryId: String(entry.id || ''), shortName });
+  }
+  // Round a whole matching daily bucket, then preserve the order of its original
+  // segments. Rounding each short timer separately would create extra time.
+  const rounding = new Map();
+  for (const seg of segments) {
+    const key = `${seg.date}|${seg.projectId}|${seg.target.shortName}|${seg.code || ''}|${seg.travel}|${seg.isBreak}`;
+    if (!rounding.has(key)) rounding.set(key, []);
+    rounding.get(key).push(seg);
+  }
+  for (const group of rounding.values()) {
+    const raw = group.reduce((sum, seg) => sum + seg.hours, 0), step = Number(settings.roundStep) > 0 ? Number(settings.roundStep) : 0.5;
+    const rounded = roundTo(raw, step, settings.roundMode);
+    for (const seg of group) seg.hours = raw ? seg.hours * rounded / raw : 0;
+  }
+  segments.sort((a, b) => a.start - b.start || (a.start.getTime() + a.minutes * 60000) - (b.start.getTime() + b.minutes * 60000) || a.projectId.localeCompare(b.projectId) || a.entryId.localeCompare(b.entryId) || a.title.localeCompare(b.title));
+  for (let day = 0; day < 7; day++) {
+    const date = dates[day], todays = segments.filter(seg => seg.day === day && seg.hours > 0), facts = dayFacts[date];
+    if (!todays.length) continue;
+    let countedWork = 0, countedBreaks = 0, hasUnpaidLeave = false, recordedEnd = 0;
+    const holiday = holidays.has(date), weekend = day >= 5 || holiday;
+    for (const seg of todays) {
+      if (seg.start.getTime() < recordedEnd) warnings.push({ level: 'warn', text: `${date}: recorded timers overlap. Review the entries; durations have not been silently removed.` });
+      recordedEnd = Math.max(recordedEnd, seg.start.getTime() + seg.minutes * 60000);
+      facts.recorded += seg.hours;
+      if (seg.isBreak) {
+        countedBreaks += seg.hours;
+        warnings.push({ level: 'info', text: `${date}: ${round2(seg.hours)} h explicitly marked break excluded from IFS and pay; each location decides whether it counts toward overtime.` });
+        continue;
+      }
+      const generalOnly = seg.timeKind === 'general-only';
+      const threshold = Number(seg.base.regularHours) > 0 ? Number(seg.base.regularHours) : policy.overtimeAfterHours;
+      const elapsed = countedWork + (seg.base.breakCountsTowardThreshold === true ? countedBreaks : 0);
+      const regular = weekend ? 0 : Math.max(0, Math.min(seg.hours, threshold - elapsed));
+      const automatic = seg.travel ? [[regular, 'F_01'], [seg.hours - regular, 'F_12']] : [[regular, 'F_03'], [seg.hours - regular, day === 6 || holiday ? 'F_10' : 'F_02']];
+      if (seg.directCode) {
+        const target = generalOnly ? generalFor(seg.base, date) : seg.target;
+        put(target, seg.code, day, seg.hours, 'recorded', true);
+        if (!generalOnly && automatic.some(([hours, code]) => hours > 0.00001 && code !== seg.code)) warnings.push({ level: 'warn', text: `${date}: confirmed tag ${seg.code} overrides the location/day calculation (${automatic.filter(([hours]) => hours > 0.00001).map(([hours, code]) => `${round2(hours)} h ${code}`).join(' + ')}).` });
+      } else for (const [hours, code] of automatic) put(seg.target, code, day, hours);
+      if (generalOnly) { facts.absence += seg.hours; if (seg.code === 'F_05') { facts.unpaid += seg.hours; hasUnpaidLeave = true; } }
+      else { countedWork += seg.hours; facts.work += seg.hours; }
+    }
+    // No fabricated project hours, no untouched empty weekdays, and no minimum
+    // that turns an explicitly unpaid absence into paid General time.
+    const entered = facts.work + facts.absence;
+    if (day < 5 && !holiday && entered > 0 && entered < policy.weekdayMinimumHours && !hasUnpaidLeave) {
+      const remaining = round2(policy.weekdayMinimumHours - entered), target = generalFor(todays.find(seg => seg.base.kind === 'general')?.base, date);
+      if (target) {
+        put(target, 'F_03', day, remaining, 'added-general'); facts.addedGeneral = remaining;
+        warnings.push({ level: 'info', text: `${date}: remaining ${remaining} h added as General to reach ${policy.weekdayMinimumHours} h; recorded project time is unchanged.` });
+      }
+    }
+    for (const key of Object.keys(facts)) facts[key] = round2(facts[key]);
+  }
+  const rowList = [...rows.values()].sort((a, b) => a.mapping.shortName.localeCompare(b.mapping.shortName) || a.code.localeCompare(b.code) || a.source.localeCompare(b.source));
+  const dayTotals = Array(7).fill(0);
+  for (const row of rowList) { row.hours = row.hours.map(round2); row.total = round2(row.hours.reduce((sum, h) => sum + h, 0)); row.hours.forEach((h, i) => { dayTotals[i] = round2(dayTotals[i] + h); }); }
+  for (let day = 0; day < 7; day++) dayFacts[dates[day]].total = dayTotals[day];
+  return { mondayIso, dates, rows: rowList, dayTotals, weekTotal: round2(dayTotals.reduce((a, b) => a + b, 0)), recordedDayTotals: dates.map(d => dayFacts[d].recorded), addedGeneralDayTotals: dates.map(d => dayFacts[d].addedGeneral), dayFacts, warnings: dedupe(warnings), buckets: segments, canExport: !blocked && rowList.length > 0 };
 }

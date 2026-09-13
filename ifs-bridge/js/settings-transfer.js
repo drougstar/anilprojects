@@ -53,10 +53,14 @@ const code = (value, path) => {
   return number(1, 999999999, true)(value, path);
 };
 const travel = object({ activityNo: string(), activitySeq: string(), activityDesc: string(), shortName: string() });
-const mapping = object({ clockifyProjectId: string(), clockifyProjectName: string(), kind: enumeration(['project', 'general', 'ignore']), regularHours: optionalHours, travelAfterHours: optionalHours,
+const mapping = object({ clockifyProjectId: string(), clockifyProjectName: string(), kind: enumeration(['project', 'general', 'break', 'ignore']), regularHours: optionalHours, travelAfterHours: optionalHours, expenseShortName: string(), breakCountsTowardThreshold: bool,
   projectId: string(), projectName: string(), subProjectId: string(), subProjectDesc: string(), activityNo: string(), activitySeq: string(), activityDesc: string(), shortName: string(), travel });
 const workShape = {
-  settingsListsVersion: enumeration([2]),
+  settingsListsVersion: enumeration([2]), theme: enumeration(['auto', 'light', 'dark']),
+  workPolicyVersion: enumeration([1]),
+  workPolicy: object({ weekdayMinimumHours: number(0,24), fullDayHours: number(0.001,24), overtimeAfterHours: number(0.001,24), sundayPaidHours: number(0,24), sundayPayMode: enumeration(['unconfirmed','plus-work','work-only']), sickEmployerPay: enumeration(['unconfirmed','normal','none']), holidayPaidHours: (value,path) => value === null ? null : number(0,24)(value,path) }),
+  workPolicyMigrationWarnings: array(string(2000), 1000),
+  timeTypes: array(object({ code: enumeration(['F_01','F_02','F_03','F_04','F_05','F_06','F_07','F_08','F_10','F_11','F_12']), description: string(2000), payMultiplier: (value,path) => value === null ? null : number(0,10)(value,path) }, ['code','description','payMultiplier']), 11, 11),
   timeCalculationMode: enumeration(['rules', 'tags']), timeCodeMappingsVersion: enumeration([2]),
   timeZone: timezone, regularHours: number(0, 24), travelAfterHours: number(0, 24), topUpMinimum: bool,
   roundStep: number(0.001, 24), roundMode: enumeration(['nearest', 'down', 'up']), holidays: array(date, 10000),
@@ -77,7 +81,7 @@ const workShape = {
   payRate: number(0, 1000000000), payCurrency: currency, restDaysPaid: bool, restDayHours: number(0, 24), payMinDay: number(0, 24),
   mapping: array(mapping), clockify: object({ apiKey: string(4096) }, ['apiKey']),
 };
-const personalShape = Object.fromEntries(['settingsListsVersion', 'timeZone', 'defaultCurrency', 'currencies', 'expenseCodes'].map(key => [key, workShape[key]]));
+const personalShape = Object.fromEntries(['settingsListsVersion', 'theme', 'timeZone', 'defaultCurrency', 'currencies', 'expenseCodes'].map(key => [key, workShape[key]]));
 const workspaceOf = workspace => enumeration(['work', 'personal'])(workspace, 'workspace');
 const shapeOf = workspace => workspace === 'personal' ? personalShape : workShape;
 
@@ -98,6 +102,7 @@ function validateSettings(value, workspace) {
     const ids = settings.expenseCodes.map(item => String(item.code));
     if (new Set(ids).size !== ids.length) fail('Settings file contains duplicate expense category codes.');
   }
+  if (settings.timeTypes && new Set(settings.timeTypes.map(type => type.code)).size !== settings.timeTypes.length) fail('Settings file contains duplicate time types.');
   return settings;
 }
 
@@ -146,6 +151,16 @@ export function parseSettingsFile(text, { workspace, current = {} } = {}) {
     settings.timeCodeMappings = structuredClone(imported.timeCodeMappings || []);
     delete settings.timeCodeMappingsVersion;
     if (!own(imported, 'timeCalculationMode')) delete settings.timeCalculationMode;
+  }
+  // Old files stored pay on tags. Re-run that migration only for types that
+  // explicitly carry an imported override; retain every unrelated type policy.
+  if (workspace === 'work' && !own(imported, 'workPolicyVersion') && !own(imported, 'timeTypes') && own(imported, 'timeCodeMappings')) {
+    const affected = new Set(imported.timeCodeMappings.filter(row => row.mode === 'code' && row.payMultiplier != null).map(row => row.code));
+    if (affected.size) {
+      delete settings.workPolicyVersion;
+      if (Array.isArray(settings.timeTypes)) settings.timeTypes = settings.timeTypes.filter(type => !affected.has(type.code));
+      if (Array.isArray(settings.workPolicyMigrationWarnings)) settings.workPolicyMigrationWarnings = settings.workPolicyMigrationWarnings.filter(message => ![...affected].some(code => message.startsWith(`${code}:`)));
+    }
   }
   if (settings.currencies && settings.defaultCurrency && !settings.currencies.includes(settings.defaultCurrency)) fail('Default currency is missing from the currency list. Include both settings in the file.');
   const includesApiKey = own(imported, 'clockify');

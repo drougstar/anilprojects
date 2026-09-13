@@ -584,7 +584,10 @@ function shortNameSuggestions() {
   for (const sh of data.sheets) if (sh.shortName) out.add(sh.shortName);
   for (const l of data.lines) if (l.shortName) out.add(l.shortName);
   for (const v of s.knownShortNames || []) out.add(v);
-  for (const m of s.mapping || []) if (m.kind === 'project' && m.projectId && s.expenseActivitySuffix) out.add(`${m.projectId}.${s.expenseActivitySuffix}`);
+  for (const m of s.mapping || []) {
+    if (m.expenseShortName) out.add(m.expenseShortName);
+    else if (m.kind === 'project' && m.projectId && s.expenseActivitySuffix) out.add(`${m.projectId}.${s.expenseActivitySuffix}`);
+  }
   return [...out];
 }
 
@@ -726,8 +729,8 @@ function openLineDialog(line, prefill = null) {
     validateExpenseChange(e, row);
     row.receiptIds = photos.map(p => p.id);
     delete row.receiptId;
-    if (row.shortName && !(s.knownShortNames || []).includes(row.shortName)) { s.knownShortNames = [...(s.knownShortNames || []), row.shortName]; ctx.saveSettings(s); }
-    if (row.costObject && !s.costObjects.includes(row.costObject)) { s.costObjects.push(row.costObject); ctx.saveSettings(s); }
+    // Record-specific destinations remain on this record; suggestions include saved history.
+    // Record-specific destinations remain on this record; suggestions include saved history.
     await atomicBatchSave([...photos.filter(p => p.isNew && p.blob).map(p => ({ table: 'receipts', record: { id: p.id, blob: p.blob, dirty: true }, expectedUpdatedAt: null })), { table: 'expenses', record: row, expectedUpdatedAt: isNew ? null : (e.updated_at ?? null) }], { label: isNew ? 'Add expense' : 'Edit expense' });
     d.close();
     toast(isNew ? 'Expense added' : 'Saved');
@@ -815,7 +818,7 @@ function openSheetsDialog() {
     const patch = { ...sheet, title: title.value.trim() || sheet.title, expenseId: expId.value.trim(), status: statusSel.value, shortName, rates: cleanRates };
     if (statusSel.value === 'entered' && !sheet.enteredAt) patch.enteredAt = new Date().toISOString();
     await save('sheets', patch);
-    if (shortName && !(s.knownShortNames || []).includes(shortName)) { s.knownShortNames = [...(s.knownShortNames || []), shortName]; ctx.saveSettings(s); }
+    // Record-specific destinations remain on this record; suggestions include saved history.
     d.close(); toast('Sheet saved'); await refresh(); scheduleSync();
   } }, 'Save');
   const delBtn = confirmButton(lines.length ? `Delete sheet and its ${lines.length} line${lines.length === 1 ? '' : 's'}` : 'Delete sheet', async () => {
@@ -884,7 +887,8 @@ function openTripDialog(trip) {
   const country = el('input', { type: 'text', value: t.country, placeholder: 'USA', list: 'dl-countries' });
   const rate = el('input', { type: 'number', step: '0.01', inputmode: 'decimal', value: t.rate, placeholder: '0.00' });
   const cur = el('select', { class: 'cur' }, s.currencies.map(c => el('option', { value: c, selected: c === t.currency }, c)));
-  const rateHint = el('small', { class: 'help' }, 'Creates the per diem line (code 3351) on the sheet: days × rate.');
+  const rateHint = el('small', { class: 'help' }, `Creates the daily allowance line (code ${s.perDiemCode}) on this sheet: days × rate.`);
+  const rememberRate = el('input', { type: 'checkbox', 'aria-label': 'Use this country rate as my future default' });
   const applyDefault = () => {
     const d = defaults.find(x => x.country.toLowerCase() === country.value.trim().toLowerCase());
     if (d && (!Number(rate.value) || isNew)) { rate.value = d.rate; cur.value = d.currency; rateHint.textContent = `Filled from your default for ${d.country}: ${d.rate} ${d.currency} per day. Change it here if this trip differs.`; }
@@ -901,24 +905,28 @@ function openTripDialog(trip) {
     if (!name.value.trim()) { status.textContent = 'Give the trip a name.'; return; }
     const dcount = Number(days.value) || calcDays();
     const row = await save('trips', { ...t, name: name.value.trim(), country: country.value.trim(), start: start.value, end: end.value, rate: Number(rate.value) || 0, currency: cur.value, days: dcount, sheetId: sheetSel.value, created_at: t.created_at || new Date().toISOString() });
-    // remember the rate for this country
-    if (row.country && row.rate > 0) {
-      const i = defaults.findIndex(x => x.country.toLowerCase() === row.country.toLowerCase());
-      const entry = { country: row.country, rate: row.rate, currency: row.currency };
-      if (i >= 0) defaults[i] = entry; else defaults.push(entry);
-      s.perDiemDefaults = defaults; ctx.saveSettings(s);
-    }
     const existing = data.lines.find(l => l.tripId === row.id && l.perdiem);
     const amount = Math.round(dcount * (row.rate || 0) * 100) / 100;
     if (amount > 0) await save('expenses', { ...(existing || { created_at: new Date().toISOString() }), sheetId: row.sheetId, date: row.end || row.start, amount, currency: row.currency, code: s.perDiemCode, written: 'Per diem', vendor: `${row.name}: ${dcount} days × ${row.rate}`, business: true, receipt: false, costObject: existing?.costObject || (s.costObjects[0] || ''), tripId: row.id, perdiem: true });
     else if (existing) await softDelete('expenses', existing.id);
-    d.close(); toast(isNew ? 'Trip added' : 'Trip saved'); await refresh(); scheduleSync();
+    let defaultMessage = '';
+    if (rememberRate.checked && row.country && row.rate > 0) {
+      const next = structuredClone(s), rates = next.perDiemDefaults || [];
+      const i = rates.findIndex(x => x.country.toLowerCase() === row.country.toLowerCase());
+      const savedRate = { country: row.country, rate: row.rate, currency: row.currency };
+      if (i >= 0) rates[i] = savedRate; else rates.push(savedRate);
+      next.perDiemDefaults = rates;
+      try { await ctx.saveSettings(next); defaultMessage = ' · future default saved'; }
+      catch (error) { defaultMessage = ' · trip saved, but future default was not saved: ' + error.message; }
+    }
+    d.close(); toast((isNew ? 'Trip added' : 'Trip saved') + defaultMessage); await refresh(); scheduleSync();
   } }, isNew ? 'Add trip' : 'Save');
   const d = openDialog(isNew ? 'New trip' : 'Edit trip', el('div', { class: 'form' },
     field('Name', name),
-    el('div', { class: 'grid2' }, field('Country', el('div', {}, country, chipRow(countries, country, { label: 'Known' })), defaults.length ? `Defaults: ${defaults.map(x => `${x.country} ${x.rate} ${x.currency}`).join(', ')}` : 'The rate you type is remembered for this country.'), field('Sheet', sheetSel, 'Where the per diem line is created.')),
+    el('div', { class: 'grid2' }, field('Country', el('div', {}, country, chipRow(countries, country, { label: 'Known' })), defaults.length ? `Defaults: ${defaults.map(x => `${x.country} ${x.rate} ${x.currency}`).join(', ')}` : 'Changes apply to this trip unless you choose to save a future default.'), field('Sheet', sheetSel, 'Where the per diem line is created.')),
     el('div', { class: 'grid2' }, field('From', start), field('To', end)),
     el('div', { class: 'grid2' }, el('label', { class: 'field' }, el('span', { class: 'lbl' }, 'Daily per diem'), el('div', { class: 'amount-row' }, rate, cur), rateHint), field('Days', days, 'Leave empty to count the dates.')),
+    el('label', { class: 'inline' }, rememberRate, 'Use this country rate as my future default'),
     el('datalist', { id: 'dl-countries' }, countries.map(c => el('option', { value: c }))),
     el('div', { class: 'actions' }, saveBtn, el('button', { onclick: () => d.close() }, 'Cancel'),
       isNew ? null : confirmButton('Delete trip', async () => { const pd = data.lines.find(l => l.tripId === t.id && l.perdiem); if (pd) await softDelete('expenses', pd.id); await softDelete('trips', t.id); d.close(); toast('Trip deleted. Its other lines stay.'); await refresh(); scheduleSync(); }),
