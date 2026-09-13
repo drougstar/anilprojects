@@ -60,6 +60,8 @@ function signedOutScreen(message = '') {
     el('p', { class: 'help' }, 'Open your private Work and Personal records.'),
     message ? el('p', { class: 'auth-message', role: 'status' }, message) : null,
     accountPanel({ signedOut: true })));
+  // Focus only when mounting sign-in, so later session checks do not interrupt typing.
+  host.querySelector('input[type="email"]')?.focus({ preventScroll: true });
 }
 
 function lockPrivateView(message) {

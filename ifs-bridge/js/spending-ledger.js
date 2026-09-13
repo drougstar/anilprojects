@@ -154,7 +154,7 @@ export function combineSpendingRows(personalRows, workContext = {}) {
     if (personalById.has(projected.id)) throw Error('Personal and Work display identifiers conflict. Reload the records before analysing them.');
     rows.push(projected);
   }
-  if (possible.size) warnings.push(`${possible.size} possible duplicate pair${possible.size === 1 ? '' : 's'} remain counted separately. Totals may include duplicate spending.`);
+  if (possible.size) warnings.push(`May include duplicates: ${possible.size} possible match${possible.size === 1 ? '' : 'es'} between Personal and Work across all loaded months and currencies. A match is a suggestion, not a confirmed duplicate. Unresolved records remain counted separately, so totals may be too high.`);
   if (count.missing) warnings.push(`${count.missing} linked Work record${count.missing === 1 ? ' is' : 's are'} unavailable. The Personal transaction${count.missing === 1 ? ' remains' : 's remain'} visible.`);
   if (count.changed) warnings.push(`${count.changed} linked Work amount${count.changed === 1 ? ' has' : 's have'} changed. Both versions remain visible until resolved.`);
   if (count.conflict) warnings.push(`${count.conflict} Personal choice${count.conflict === 1 ? ' differs' : 's differ'} from a company claim in Work. Your Personal choice is kept in this view.`);

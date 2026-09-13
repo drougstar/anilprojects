@@ -144,7 +144,7 @@ export function filterPersonalEntries(entries, filters = {}) {
     (!search || keyOf([entry.merchant, entry.note, entry.description, entry.category, entry.date, entry.currency, (entry.signedMinor / 100).toFixed(2)].join(' ')).includes(search)));
 }
 
-function sameElapsedComparison(entries, { month, today, currency, complete }) {
+function sameElapsedComparison(entries, { month, today, currency, complete, comparisonBlockedReason }) {
   const currentBounds = personalMonthBounds(month);
   const todayMonth = today.slice(0, 7), isFutureMonth = month > todayMonth;
   const elapsedDays = isFutureMonth ? 0 : month === todayMonth ? Number(today.slice(8)) : currentBounds.days;
@@ -167,8 +167,8 @@ function sameElapsedComparison(entries, { month, today, currency, complete }) {
   const currentEntries = entries.filter(e => e.currency === currency && e.date >= currentBounds.first && currentEnd && e.date <= currentEnd);
   const previousEntries = entries.filter(e => e.currency === currency && e.date >= previousBounds.first && previousEnd && e.date <= previousEnd);
   const current = totals(currentEntries, currency), previous = totals(previousEntries, currency);
-  const available = !!complete && comparisonDays > 0 && current.count > 0 && previous.count > 0;
-  const reason = !complete ? 'Some records could not be loaded or validated.' : !comparisonDays ? 'This month has not started yet.' : !previous.count ? 'No entries are recorded for the matching previous-month period.' : !current.count ? 'No entries are recorded for the current comparison period.' : '';
+  const available = !!complete && !comparisonBlockedReason && comparisonDays > 0 && current.count > 0 && previous.count > 0;
+  const reason = !complete ? 'Some records could not be loaded or validated.' : comparisonBlockedReason || (!comparisonDays ? 'This month has not started yet.' : !previous.count ? 'No entries are recorded for the matching previous-month period.' : !current.count ? 'No entries are recorded for the current comparison period.' : '');
   const netDeltaMinor = available ? safeAdd(current.netMinor, -previous.netMinor) : null;
   const purchasesDeltaMinor = available ? safeAdd(current.purchasesMinor, -previous.purchasesMinor) : null;
   return { available, reason, previousMonth, days: comparisonDays, elapsedDays, isCurrentMonth: month === todayMonth, isFutureMonth,
@@ -185,9 +185,11 @@ function sameElapsedComparison(entries, { month, today, currency, complete }) {
  * All aggregate amounts are integer hundredths. Full-month chart totals stay
  * independent of list filters, while filteredTotals describes filteredEntries.
  * `complete` means the supplied records loaded successfully, never that every
- * real-world purchase was recorded. No bank balance or forecast is calculated.
+ * real-world purchase was recorded. A comparison can be paused independently
+ * when loaded records may overlap; that does not make those records missing.
+ * No bank balance or forecast is calculated.
  */
-export function analyzePersonalMonth(rows, { month, today, currency = '', categories = [], filters = {}, complete = true } = {}) {
+export function analyzePersonalMonth(rows, { month, today, currency = '', categories = [], filters = {}, complete = true, comparisonBlockedReason = '' } = {}) {
   const bounds = personalMonthBounds(month);
   if (!validDate(today)) throw Error('Supply today as a valid local calendar date.');
   const normalized = normalizePersonalEntries(rows, { categories });
@@ -208,7 +210,7 @@ export function analyzePersonalMonth(rows, { month, today, currency = '', catego
   const futureCount = entries.filter(e => e.date > today).length;
   if (futureCount) warnings.push(`${futureCount} entr${futureCount === 1 ? 'y is' : 'ies are'} dated after today. The month total includes them; the elapsed-day comparison does not.`);
   if (selectedTotals.netMinor < 0) warnings.push('Recorded refunds exceed purchases in this month. Refunds are counted on their recorded date.');
-  const comparison = sameElapsedComparison(normalized.entries, { month, today, currency, complete: validComplete });
+  const comparison = sameElapsedComparison(normalized.entries, { month, today, currency, complete: validComplete, comparisonBlockedReason: clean(comparisonBlockedReason) });
   const dates = entries.map(e => e.date).sort();
   return { month, currency, monthStart: bounds.first, monthEnd: bounds.last, daysInMonth: bounds.days,
     entries, filteredEntries, selectedTotals, filteredTotals, currencyTotals, currencies, categories: categoryGroups, merchants: merchantGroups,

@@ -113,8 +113,11 @@ function loadWorkSnapshot() {
 }
 function analysis() {
   const rows = includedRows();
-  const complete = workCoverage?.source === 'cloud' && !workCoverage.notice && !ledger.possibleDuplicates?.length;
-  const options = { month: state.month, today: today(), currency: state.currency, categories: ctx.settings().expenseCodes, complete };
+  const complete = workCoverage?.source === 'cloud' && !workCoverage.notice;
+  // Possible overlap is different from a failed load. Keep totals provisional
+  // without incorrectly telling the user that their records are missing.
+  const comparisonBlockedReason = ledger.possibleDuplicates?.length ? 'Comparisons are paused while possible duplicate spending remains unresolved.' : '';
+  const options = { month: state.month, today: today(), currency: state.currency, categories: ctx.settings().expenseCodes, complete, comparisonBlockedReason };
   const full = analyzePersonalMonth(rows, options);
   const chosen = analyzePersonalMonth(filterPersonalViewRows(rows, state.filters, options.categories), options);
   return { ...chosen, totalEntryCount: full.entries.length, filterOptions: full, currencyTotals: full.currencyTotals,
@@ -284,7 +287,6 @@ export async function renderPersonal(root, nextView = 'overview') {
     const coverageWarnings = [...(ledger.warnings || [])];
     if (workCoverage?.source !== 'cloud') coverageWarnings.unshift(workCoverage?.notice || 'Work is available only from this device. The combined view may be incomplete.');
     else if (workCoverage.notice) coverageWarnings.unshift(workCoverage.notice);
-    if (ledger.possibleDuplicates?.length) coverageWarnings.unshift('May include duplicates: some bank purchases and Work expenses could be the same charge. They remain included until their relationship is clear.');
     if (coverageWarnings.length) root.append(el('div', { class: 'personal-warning', role: 'status', 'data-spending-coverage': '' }, ...[...new Set(coverageWarnings)].map(text => el('p', {}, text))));
     if (model.warnings?.length) root.append(el('div', { class: 'personal-warning', role: 'alert' }, ...model.warnings.map(text => el('p', {}, text))));
     if (view === 'study') root.append(renderPersonalStudy({ rows: includedRows(), month: state.month, currency: state.currency,
