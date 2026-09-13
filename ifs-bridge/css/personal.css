@@ -1,6 +1,14 @@
 /* Personal spending keeps its monthly analysis independent of Work's sheet layout. */
 body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #tab-expenses,body[data-workspace="personal"] #tab-study{max-width:1120px;margin-inline:auto}
 .personal-page{min-width:0}
+.personal-spending-scope{margin:0 0 12px;padding:12px 14px;border:1px solid var(--rule);border-radius:10px;background:var(--surface)}
+.personal-scope-options{display:flex;align-items:center;gap:10px 22px;flex-wrap:wrap}
+.personal-scope-options label{display:flex;align-items:center;gap:8px;min-height:34px;cursor:pointer;font-size:13px}
+.personal-scope-options input{width:18px;height:18px;accent-color:var(--accent)}
+.personal-spending-scope small{display:block;color:var(--ink-3);font-size:12px;margin-top:3px}
+.personal-import-receipt{border:1px solid var(--accent);border-radius:10px;padding:14px;margin:0 0 14px;background:var(--accent-soft)}
+.personal-import-receipt h3{font-size:15px;margin:0}.personal-import-receipt p{font-size:13px;margin:6px 0}
+.personal-import-months{display:flex;gap:8px 16px;flex-wrap:wrap}.personal-import-months button{font-size:12px}
 .personal-toolbar{margin:0 0 14px}
 .personal-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .personal-month{display:flex;align-items:center;gap:4px}
@@ -94,10 +102,6 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
 .personal-metric strong{white-space:nowrap;overflow-x:auto;max-width:100%;overflow-wrap:normal}
 @media(max-width:760px){.personal-metric strong{font-size:clamp(15px,4.3vw,21px)}.personal-metric.primary-metric strong{font-size:29px}}
 .personal-toolbar-actions{flex-wrap:wrap}.personal-toolbar-actions>button{white-space:nowrap;flex-shrink:0}
-.personal-main-total{grid-template-columns:1fr;margin:0 0 12px}
-.personal-main-total .personal-metric{padding:20px 22px}
-.personal-main-total .personal-metric strong{font-size:34px}
-.personal-secondary-metrics{grid-template-columns:1fr 1fr}
 .personal-more{position:relative}
 .personal-more>summary{cursor:pointer;list-style:none;border:1px solid var(--rule);border-radius:8px;padding:10px 14px;min-height:40px}
 .personal-more>summary::-webkit-details-marker{display:none}
@@ -106,14 +110,10 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
 .personal-more-actions>button{text-align:left;border:0;background:transparent;padding:10px 12px;white-space:normal;min-height:42px}
 .personal-more-actions>button:hover{background:var(--surface-2)}
 .personal-connection{padding:9px 12px;color:var(--ink-3);font-size:12px;border-top:1px solid var(--rule)}
-.personal-extra-details{border-top:1px solid var(--rule);padding:12px 0;margin-top:2px}
-.personal-extra-details>summary,.personal-filter-panel>summary{cursor:pointer;font-size:13px;color:var(--ink-2)}
-.personal-extra-content{padding-top:14px}
+.personal-filter-panel>summary{cursor:pointer;font-size:13px;color:var(--ink-2)}
 .personal-status[hidden],.personal-filter-state[hidden]{display:none}
 body[data-workspace="personal"] .tabs button[aria-current="page"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
 @media(max-width:760px){
   .personal-toolbar-actions{justify-content:flex-end;width:100%}.personal-toolbar-actions>.primary{flex:0 0 auto}
-  .personal-main-total{grid-template-columns:1fr}.personal-main-total .personal-metric strong{font-size:32px}
-  .personal-secondary-metrics{grid-template-columns:1fr 1fr}
-  body[data-workspace="personal"] .tabs{grid-template-columns:repeat(3,minmax(0,1fr))}
+  body[data-workspace="personal"] .tabs{grid-template-columns:repeat(4,minmax(0,1fr))}
 }

@@ -1,9 +1,9 @@
 // Read-only views over the Personal ledger. Bank movements stay available for
 // review, but repayments, transfers and pending charges are not purchase totals.
 import { el } from './dom.js';
-import { minorAmount, validDate, spendingPurpose as purposeOf } from './expense-workflows.js';
+import { minorAmount, validDate } from './expense-workflows.js';
 import { normalizePersonalEntries, personalMonthBounds } from './personal-analytics.js';
-import { personalCard, filterPersonalViewEntries } from './personal-filters.js';
+import { personalCard, filterPersonalViewEntries, effectiveSpendingPurpose as purposeOf } from './personal-filters.js';
 
 const clean = value => String(value ?? '').trim().replace(/\s+/g, ' ');
 const key = value => clean(value).normalize('NFKC').toLocaleLowerCase('tr-TR');

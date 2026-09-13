@@ -250,6 +250,7 @@ function paintHelp(forceOpen = false) {
   let dismissed = false;
   try { dismissed = localStorage.getItem(scopedKey('ifsbridge.expHelp')) === 'off'; } catch {}
   host.replaceChildren();
+  if (!personalSpace()) host.append(el('p', { class: 'help work-expense-purpose' }, 'Work keeps your IFS claims and trip costs. Personal → All spending brings them together with your bank imports.'));
   if (dismissed) return;
   if (personalSpace()) {
     host.append(el('details', { class: 'help-box exp-help-fold', open }, el('summary', {}, 'How personal spending works'), el('p', {}, 'Record purchases and refunds, keep receipts, and review budgets. Use a negative amount for a refund. Tools includes receipt review, recurring drafts, CSV import and an optional Pocket link.')));
@@ -258,7 +259,7 @@ function paintHelp(forceOpen = false) {
   host.append(el('details', { class: 'help-box exp-help-fold', open },
     el('summary', {}, 'How expenses work here'),
     el('ol', {},
-      el('li', {}, 'Add every expense as it happens, on the phone or the PC. ', el('strong', {}, 'Business'), ' lines go to IFS, ', el('strong', {}, 'Personal'), ' lines stay in the app so you keep one record of everything.'),
+      el('li', {}, 'Choose ', el('strong', {}, 'Claim from company'), ' for costs you want to send to IFS. ', el('strong', {}, 'Not claimed'), ' keeps a cost with this Work sheet or trip, outside the IFS claim. The cost also appears in Personal’s All spending view.'),
       el('li', {}, 'A sheet here is one IFS expense sheet. Create the sheet in IFS, then type its Expense ID and project short name under “Sheets…”. Rates come from the Central Bank for each line’s date.'),
       el('li', {}, 'At month end follow the “Month close” list: press ', el('strong', {}, 'Copy for IFS'), ', paste into the Expense Details grid (right-click → Edit → Paste Object), save in IFS, then press “Mark as entered”. Lines added later are exported on their own with “Copy new lines”.'),
       el('li', {}, 'A trip creates the per diem line on the sheet and shows what you spent against it.')),
@@ -352,8 +353,8 @@ function paintSummary() {
   const ratesOk = foreign.length === 0 || expAll.unrated.length === 0;
   const stateText = expAll.error ? expAll.error : sheet.status === 'entered' ? `In IFS ${fmtWhen(sheet.enteredAt)}${newCount ? ` · ${newCount} new line${newCount === 1 ? '' : 's'} not in IFS yet` : ''}` : sheet.status === 'exported' ? 'Copied; after saving in IFS press Mark as entered' : '';
   host.replaceChildren(
-    el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'To IFS'), el('b', {}, money(biz)), el('small', {}, `${biz.length} line${biz.length === 1 ? '' : 's'} · ${biz.filter(l => l.receipt).length} with receipt${enteredCount ? ` · ${enteredCount} in IFS` : ''}`)),
-    el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'Personal'), el('b', {}, money(pers)), el('small', {}, `${pers.length} line${pers.length === 1 ? '' : 's'}, stays here`)),
+    el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'Claim from company'), el('b', {}, money(biz)), el('small', {}, `${biz.length} line${biz.length === 1 ? '' : 's'} · ${biz.filter(l => l.receipt).length} with receipt${enteredCount ? ` · ${enteredCount} in IFS` : ''}`)),
+    el('div', { class: 'sum-item' }, el('span', { class: 'k' }, 'Not claimed'), el('b', {}, money(pers)), el('small', {}, `${pers.length} line${pers.length === 1 ? '' : 's'} kept in Work · excluded from IFS`)),
     el('div', { class: 'sum-line' },
       sheet.shortName ? el('code', {}, sheet.shortName) : el('span', { class: 'warn-text' }, 'project short name not set'),
       el('span', { id: 'exp-rate-status', role: 'status', 'aria-live': 'polite', class: ratesOk ? 'muted' : 'warn-text', title: rateText }, loadingRates ? 'Fetching exchange rates…' : ratesOk ? 'rates ✓' : failedRates.length ? `Could not load ${failedRates.length} date rate${failedRates.length === 1 ? '' : 's'}` : `${expAll.unrated.length} line${expAll.unrated.length === 1 ? '' : 's'} without a rate`),
@@ -368,14 +369,14 @@ function paintSummary() {
 function paintTools() {
   const host = $('#exp-tools');
   const search = el('input', { id: 'exp-search', type: 'search', 'aria-label': personalSpace() ? 'Search expenses in this collection' : 'Search expenses in this sheet', 'aria-controls': 'exp-list', placeholder: 'Search description, vendor, date…', value: state.search, oninput: e => { state.search = e.target.value; paintList(); } });
-  const chips = el('div', { class: 'chips', role: 'group', 'aria-label': 'Expense type' }, (personalSpace() ? [['all', 'All']] : [['all', 'All'], ['business', 'Business'], ['personal', 'Personal']]).map(([k, l]) =>
+  const chips = el('div', { class: 'chips', role: 'group', 'aria-label': 'Company claim' }, (personalSpace() ? [['all', 'All']] : [['all', 'All'], ['business', 'Claim from company'], ['personal', 'Not claimed']]).map(([k, l]) =>
     el('button', { type: 'button', class: 'chip' + (state.filter === k ? ' on' : ''), 'data-filter': k, 'aria-pressed': String(state.filter === k), onclick: () => { state.filter = k; paintList(); } }, l)));
   const months = [...new Set(sheetLines().map(l => (l.date || '').slice(0, 7)).filter(Boolean))].sort().reverse();
   if (state.month && !months.includes(state.month)) state.month = '';
   const monthChips = el('div', { class: 'chips months', role: 'group', 'aria-label': 'Expense month' }, el('span', { class: 'chips-label' }, 'Month'), [['', 'All'], ...months.map(m => [m, monthLabel(m)])].map(([k, l]) =>
     el('button', { type: 'button', class: 'chip' + (state.month === k ? ' on' : ''), 'data-month': k, 'aria-pressed': String(state.month === k), onclick: () => { state.month = k; paintList(); } }, l)));
   const sortSel = el('select', { class: 'sort-select', 'aria-label': 'Order within a day', onchange: e => { state.sort = e.target.value; try { localStorage.setItem(scopedKey('ifsbridge.expSort'), state.sort); } catch {} paintList(); } },
-    (personalSpace() ? [['order', 'In receipt order']] : [['order', 'In receipt order'], ['bizFirst', 'Business first, then personal'], ['persFirst', 'Personal first, then business']]).map(([v, l]) => el('option', { value: v, selected: state.sort === v }, l)));
+    (personalSpace() ? [['order', 'In receipt order']] : [['order', 'In receipt order'], ['bizFirst', 'Claim lines first'], ['persFirst', 'Not claimed first']]).map(([v, l]) => el('option', { value: v, selected: state.sort === v }, l)));
   const results = el('div', { class: 'exp-results' },
     el('span', { id: 'exp-results-count', class: 'exp-results-count muted', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }),
     el('button', { id: 'exp-clear-filters', type: 'button', class: 'link', onclick: () => {
@@ -431,7 +432,7 @@ function paintList() {
   if (state.month) {
     const biz = lines.filter(l => l.business), pers = lines.filter(l => !l.business);
     const money = ls => Object.entries(totalsByCurrency(ls)).map(([c, n]) => fmtMoney(n, c)).join(' + ') || '0.00';
-    host.append(el('div', { class: 'month-total' }, el('b', {}, monthLabel(state.month)), personalSpace() ? el('span', {}, `Net spending ${money(lines)}`) : el('span', {}, `To IFS ${money(biz)}`), personalSpace() ? null : el('span', {}, `Personal ${money(pers)}`), el('span', { class: 'muted' }, `${lines.length} line${lines.length === 1 ? '' : 's'}`)));
+    host.append(el('div', { class: 'month-total' }, el('b', {}, monthLabel(state.month)), personalSpace() ? el('span', {}, `Net spending ${money(lines)}`) : el('span', {}, `Claim from company ${money(biz)}`), personalSpace() ? null : el('span', {}, `Not claimed ${money(pers)}`), el('span', { class: 'muted' }, `${lines.length} line${lines.length === 1 ? '' : 's'}`)));
   }
   const byDate = new Map();
   for (const l of lines) { if (!byDate.has(l.date)) byDate.set(l.date, []); byDate.get(l.date).push(l); }
@@ -445,8 +446,8 @@ function paintList() {
     host.append(el('div', { class: 'day-group' },
       el('div', { class: 'day-head' }, el('span', { class: 'day-name' }, fmtDate(date)),
         el('span', { class: 'day-totals' },
-          dayBiz.length ? el('span', {}, el('i', {}, 'Business'), el('span', { class: 'amt' }, money(dayBiz))) : null,
-          dayPers.length ? el('span', {}, el('i', {}, 'Personal'), el('span', { class: 'amt' }, money(dayPers))) : null,
+          dayBiz.length ? el('span', {}, el('i', {}, 'Claim from company'), el('span', { class: 'amt' }, money(dayBiz))) : null,
+          dayPers.length ? el('span', {}, el('i', {}, personalSpace() ? 'Personal' : 'Not claimed'), el('span', { class: 'amt' }, money(dayPers))) : null,
           dayBiz.length && dayPers.length ? el('span', { class: 'day-sum' }, el('i', {}, 'Total'), el('span', { class: 'amt' }, money(ls))) : null)),
       ls.map(l => {
         const idx = dayAll.findIndex(x => x.id === l.id);
@@ -457,7 +458,7 @@ function paintList() {
           el('span', { class: 'l-main' }, el('b', {}, l.written || codeOf(l.code)?.short || 'Expense'), el('small', {}, [l.vendor, codeOf(l.code)?.short, l.costObject].filter(Boolean).join(' · '))),
           el('span', { class: 'l-side' }, el('b', { class: 'amt' }, fmtMoney(l.amount, l.currency)),
             el('span', { class: 'tags' },
-              l.business ? el('span', { class: 'pill ' + (l.receipt ? 'rec' : 'norec') }, l.receipt ? `Receipt #${refs.get(l.id)}` : 'No receipt') : el('span', { class: 'pill pers' }, 'Personal'),
+              l.business ? el('span', { class: 'pill ' + (l.receipt ? 'rec' : 'norec') }, l.receipt ? `Receipt #${refs.get(l.id)}` : 'No receipt') : el('span', { class: 'pill pers' }, personalSpace() ? 'Personal' : 'Not claimed'),
               l.business && l.entered ? el('span', { class: 'pill inifs', title: `Entered in IFS ${fmtWhen(l.enteredAt)}` }, 'In IFS') : null,
               l.business && !l.entered && anyEntered ? el('span', { class: 'pill newline' }, 'New') : null,
               reimbursementSummary(l).eligible && (l.reimbursement?.stage || l.reimbursement?.payments?.length) ? el('span', { class: 'pill reimbursement' }, { awaiting: 'Awaiting payment', partial: 'Partly paid', paid: 'Paid' }[reimbursementSummary(l).status]) : null,
@@ -488,14 +489,14 @@ function paintTrips() {
     return el('button', { type: 'button', class: 'trip', onclick: () => openTripDialog(tr) },
       el('b', {}, tr.name), el('small', {}, `${tr.start} → ${tr.end} · ${tr.days} day${tr.days === 1 ? '' : 's'} × ${fmtMoney(tr.rate, tr.currency)}${tr.country ? ' · ' + tr.country : ''}`),
       el('div', { class: 'trip-nums' },
-        el('span', {}, el('i', {}, 'Per diem'), fmt(income)), el('span', {}, el('i', {}, 'Out of pocket'), fmt(pocket)),
-        el('span', {}, el('i', {}, 'Reimbursed'), fmt(reimb)), el('span', { class: 'net' }, el('i', {}, 'Net'), Object.entries(net).map(([c, n]) => fmtMoney(Math.round(n * 100) / 100, c)).join(' + ') || '—')));
+        el('span', {}, el('i', {}, 'Per diem allowance'), fmt(income)), el('span', {}, el('i', {}, 'Not claimed'), fmt(pocket)),
+        el('span', {}, el('i', {}, 'Claim amount'), fmt(reimb)), el('span', { class: 'net' }, el('i', {}, 'Allowance left'), Object.entries(net).map(([c, n]) => fmtMoney(Math.round(n * 100) / 100, c)).join(' + ') || '—')));
   });
   let open = false;
   try { open = localStorage.getItem(scopedKey('ifsbridge.tripsOpen')) === 'open'; } catch {}
   host.replaceChildren(el('details', { class: 'trips-fold', open, ontoggle: ev => { try { localStorage.setItem(scopedKey('ifsbridge.tripsOpen'), ev.target.open ? 'open' : 'closed'); } catch {} } },
     el('summary', {}, `Trips and per diem (${data.trips.length})`),
-    el('div', { class: 'row' }, el('button', { onclick: () => openTripDialog(null) }, '+ Add trip'), el('span', { class: 'help' }, 'A trip creates the per diem line on its sheet; its personal lines count as out of pocket, business lines as reimbursed.')),
+    el('div', { class: 'row' }, el('button', { onclick: () => openTripDialog(null) }, '+ Add trip'), el('span', { class: 'help' }, 'Allowance left is per diem minus this trip’s not-claimed costs. Claim amounts are shown separately; these totals do not mean payment was received.')),
     cards.length ? el('div', { class: 'trip-list' }, cards) : el('p', { class: 'empty' }, 'No trips yet.')));
 }
 
@@ -628,8 +629,8 @@ function openLineDialog(line, prefill = null) {
   const trip = el('select', {}, el('option', { value: '' }, 'No trip'), data.trips.map(t => el('option', { value: t.id, selected: t.id === e.tripId }, t.name)));
   const sheetSel = el('select', {}, data.sheets.map(sh => el('option', { value: sh.id, selected: sh.id === e.sheetId }, `${sh.title}${sh.expenseId ? ' · IFS ' + sh.expenseId : ''}`)));
   const recChk = el('input', { type: 'checkbox', checked: receipt, onchange: ev => { receipt = ev.target.checked; updateRef(); } });
-  const bizBtn = el('button', { type: 'button', class: 'seg' + (business ? ' on' : ''), onclick: () => setBiz(true) }, 'Business → IFS');
-  const persBtn = el('button', { type: 'button', class: 'seg' + (!business ? ' on' : ''), onclick: () => setBiz(false) }, 'Personal');
+  const bizBtn = el('button', { type: 'button', class: 'seg' + (business ? ' on' : ''), onclick: () => setBiz(true) }, 'Claim from company');
+  const persBtn = el('button', { type: 'button', class: 'seg' + (!business ? ' on' : ''), onclick: () => setBiz(false) }, 'Not claimed');
   const bizHelp = el('small', { class: 'help' });
   const receiptRow = el('div', { class: 'row receipt-row' });
   const refLine = el('div', { class: 'ref-preview' });
@@ -674,7 +675,7 @@ function openLineDialog(line, prefill = null) {
       return el('span', { class: 'thumb' }, img, missing, el('button', { type: 'button', class: 'thumb-x', title: 'Remove photo', 'aria-label': 'Remove photo', onclick: () => { photos.splice(photos.indexOf(p), 1); paintGallery(); } }, '×'));
     }));
   }
-  function setBiz(b) { business = personalSpace() ? false : b; b = business; bizBtn.classList.toggle('on', b); persBtn.classList.toggle('on', !b); bizHelp.textContent = b ? 'Exported to IFS with the reference shown below.' : 'Personal spending. Use a negative amount for a refund.'; receiptRow.hidden = false; recChk.closest('label').hidden = !b; shortField.hidden = !b; updateRef(); }
+  function setBiz(b) { business = personalSpace() ? false : b; b = business; bizBtn.classList.toggle('on', b); persBtn.classList.toggle('on', !b); bizHelp.textContent = b ? 'Included when you copy this sheet to IFS. Payment is tracked separately.' : 'Kept with this Work sheet or trip, outside the IFS claim. It also appears in Personal’s All spending view. Import bank statements in Personal.'; receiptRow.hidden = false; recChk.closest('label').hidden = !b; shortField.hidden = !b; updateRef(); }
   function updateRef() {
     if (!business) { refLine.textContent = ''; refLine.hidden = true; return; }
     const draft = { ...e, id: e.id || '__draft', date: date.value, business: true, receipt, written: written.value.trim(), costObject: costObj.value.trim(), created_at: e.created_at || '9999' };
@@ -751,7 +752,7 @@ function openLineDialog(line, prefill = null) {
     dupBox,
     field('Date', el('div', {}, date, dateChips)),
     field(personalSpace() ? 'Category' : 'Type', personalSpace() ? category : code, personalSpace() ? 'Used in spending reports and budgets.' : 'The IFS expense type. The number is the IFS expense code.'),
-    personalSpace() ? null : el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Who pays'), el('div', { class: 'segs' }, bizBtn, persBtn), bizHelp),
+    personalSpace() ? null : el('div', { class: 'field' }, el('span', { class: 'lbl' }, 'Company claim'), el('div', { class: 'segs' }, bizBtn, persBtn), bizHelp),
     receiptRow,
     gallery,
     personalSpace() ? [merchantField, noteField] : [noteField, merchantField],

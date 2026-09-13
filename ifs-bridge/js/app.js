@@ -2,14 +2,14 @@ import { createAccountPreferences } from './account-preferences.js';
 import { renderSickBenefitTool } from './sick-benefit.js';
 import { openLeaveEntryDialog } from './leave-entry.js';
 import { currentScope, scopedKey, scopeIsCurrent, assertScopeCurrent } from './scope.js';
-import { initWorkspaceUI, openAccount, connectionStatusPanel, initAuthGate, revealPrivateApp } from './workspace-ui.js';
+import { initWorkspaceUI, openAccount, connectionStatusPanel, initAuthGate, revealPrivateApp, openWorkExpenseFromPersonal, takeWorkExpenseRequest } from './workspace-ui.js';
 import { Clockify } from './clockify.js';
 import { buildWeek, mondayOf, fetchWindow, DAYS, localToUtc, utcToLocalInput } from './rules.js';
 import { timeCodeInfo } from './time-codes.js';
 import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber } from './ifs.js';
 import { loadSettings, saveSettings, defaultsForScope, hasSavedSettings } from './store.js';
 import { createSettingsPage } from './settings-ui.js';
-import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, openExpenseReview } from './expenses.js';
+import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, openExpenseReview, openExpense } from './expenses.js';
 import { el, $, confirmButton, toast, openDialog, download, field as dlgField } from './dom.js';
 import { initLocalBackup, backupAvailable, pushBackup } from './localbackup.js';
 import { sync, checkSetup } from './sync.js';
@@ -580,10 +580,10 @@ async function boot() {
   });
   const personal = currentScope().workspace === 'personal';
   document.querySelector('.tabs button[data-tab="week"]').hidden = personal;
-  document.querySelector('.tabs button[data-tab="study"]').hidden = true;
+  document.querySelector('.tabs button[data-tab="study"]').hidden = !personal;
   initExpenses({ settings: () => settings, saveSettings: async s => { const result = await accountPreferences.save(s); assertScopeCurrent(); settings = result.settings; if (result.state !== 'synced') throw Error(result.message); return result; }, scope: currentScope, el, $, openSettings });
   initReport({ settings: () => settings, saveSettings: s => saveSettings(s), openSettings });
-  initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view) });
+  initPersonal({ settings: () => settings, navigateView: view => showTab(view === 'transactions' ? 'expenses' : view), openWorkExpense: openWorkExpenseFromPersonal });
   $('#tab-week .toolbar').after(el('div', { id: 'week-strip', class: 'week-strip' }));
   $('#btn-bulk').addEventListener('click', openBulkDialog);
   if (!personal && settings.clockify.apiKey) renderWeekStrip();
@@ -599,6 +599,8 @@ async function boot() {
   let tab = personal ? 'overview' : 'week';
   try { tab = localStorage.getItem(scopedKey('ifsbridge.tab')) || tab; } catch {}
   showTab(tab);
+  const workExpense = personal ? null : takeWorkExpenseRequest();
+  if (workExpense) { showTab('expenses'); await openExpense(workExpense); }
   } catch (error) {
     if (!scopeIsCurrent()) return;
     $('#main-content').replaceChildren(el('div', { class: 'empty' }, el('h3', {}, 'Could not open this space'), el('p', {}, error.message), el('button', { onclick: () => location.reload() }, 'Reload')));

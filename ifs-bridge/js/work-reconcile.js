@@ -18,7 +18,7 @@ async function refreshedWork(readWork, guard) {
 }
 function completed(plan, matched) {
   const unresolved = plan.counts.unresolved;
-  let message = matched ? `${matched} purchase${matched === 1 ? '' : 's'} matched with Work and excluded from Personal Summary.`
+  let message = matched ? `${matched} purchase${matched === 1 ? '' : 's'} matched with Work. Use Exclude company costs to leave company costs out of the analysis.`
     : unresolved ? 'No clear Work matches were found.' : 'No unreviewed purchases need Work matching in this month.';
   if (unresolved) message += ` ${unresolved} unmatched purchase${unresolved === 1 ? '' : 's'} left unchanged.`;
   if (!plan.counts.workExpenses && unresolved) message += ' No business purchases are currently available in your Work area.';
@@ -82,5 +82,5 @@ export async function matchImportedWorkPurchases({ items, existingRows, isCurren
   guard();
   return { items: items.map(item => changed.has(item.record.id) && item.table === 'expenses' ? { ...item, record: changed.get(item.record.id) } : item),
     ...(changes.length ? { expectedExpenses: existingRows } : {}),
-    matched: changes.length, message: changes.length ? `${changes.length} imported purchase${changes.length === 1 ? '' : 's'} matched with Work and excluded from Personal Summary.` : 'No clear Work matches in these new transactions; existing purpose choices were kept.' };
+    matched: changes.length, message: changes.length ? `${changes.length} imported purchase${changes.length === 1 ? '' : 's'} matched with Work. Use Exclude company costs to leave company costs out of the analysis.` : 'No clear Work matches in these new transactions; existing purpose choices were kept.' };
 }

@@ -17,6 +17,25 @@ const reload = ({ continueVisit = false } = {}) => {
   location.reload();
 };
 const textInput = (value = '', options = {}) => el('input', { value, ...options });
+const WORK_RECORD_REQUEST = 'ifsbridge.open-work-expense';
+const validWorkId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(id);
+// A short-lived same-account handoff uses the existing workspace picker flow.
+// It grants no access and creates no expense; Work opens its own stored record.
+export function openWorkExpenseFromPersonal(id) {
+  assertScopeCurrent();
+  if (currentScope().workspace !== 'personal' || !validWorkId(id)) throw Error('This Work expense cannot be opened.');
+  sessionStorage.setItem(WORK_RECORD_REQUEST, JSON.stringify({ id, accountKey: currentScope().accountKey, at: Date.now() }));
+  selectWorkspace('work'); reload({ continueVisit: true });
+}
+export function takeWorkExpenseRequest() {
+  assertScopeCurrent();
+  if (currentScope().workspace !== 'work') return null;
+  try {
+    const raw = sessionStorage.getItem(WORK_RECORD_REQUEST); sessionStorage.removeItem(WORK_RECORD_REQUEST);
+    const request = JSON.parse(raw || 'null'), age = Date.now() - request?.at;
+    return request?.accountKey === currentScope().accountKey && validWorkId(request.id) && age >= 0 && age < 120000 ? request.id : null;
+  } catch { return null; }
+}
 
 let authTimer, authExpiryTimer, checkingSession = false, privateViewOpened = false, onAuthLock;
 let pageDeparted = false, authActionId = 0, personalChallengeOpened = false;

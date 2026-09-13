@@ -42,6 +42,12 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   const view = pick([['new', 'Ready to import'], ['possible-match', 'Needs duplicate review'], ['enrichment', 'New workbook details'], ['duplicate', 'Duplicates'], ['excluded', 'Excluded'], ['error', 'Errors'], ['all', 'All source rows']], 'new', 'Import review filter');
   const saveButton = el('button', { type: 'button', class: 'primary', disabled: true }, 'Import');
   const summary = el('div', { class: 'bank-import-summary' });
+  const coverage = el('p', { class: 'help bank-file-coverage', hidden: true });
+  const detailChoice = el('input', { type: 'checkbox', 'aria-label': 'Add all matching workbook details' });
+  const detailLabel = el('span');
+  const detailsBatch = el('div', { class: 'bank-details-batch', hidden: true },
+    el('label', {}, detailChoice, detailLabel), el('p', { class: 'help' }, 'Adds matching categories, notes and other details in one batch. Amounts and dates stay unchanged; your earlier edits are protected.'));
+  const exceptions = el('div', { class: 'bank-import-exceptions', hidden: true });
   const bulkPurpose = pick([['', 'Leave unchanged'], ...purposes], '', 'Purpose for selected purchases');
   const review = el('details', { class: 'bank-import-review', hidden: true }, el('summary', {}, 'Review transactions'), preview);
   const options = el('details', { class: 'bank-import-options', hidden: true }, el('summary', {}, 'Import options'),
@@ -50,9 +56,10 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     el('button', { type: 'button', onclick: () => safe(buildPreview)() }, 'Apply options'),
     sources, warnings, el('p', { class: 'help' }, 'Files are read on this device. Only imported transactions sync to your account.'));
   const body = el('div', { class: 'bank-import' },
-    field('Choose Excel files', files),
+    el('p', { class: 'help' }, 'Select your bank downloads together: TL, USD, EUR, statements and in-month transactions. You can include your detailed spending workbook too. No Excel editing or CSV conversion needed.'),
+    field('Add your files', files), coverage,
     matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear Work matches are handled automatically.') : null,
-    summary, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
+    summary, detailsBatch, exceptions, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
   const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
   const active = () => scopeIsCurrent() && dialog.open && dialog.isConnected && !aborter.signal.aborted;
   const invalidate = () => { valid = false; selected.clear(); saveButton.disabled = true; status.textContent = 'Options changed. Apply options to continue.'; preview.replaceChildren(el('p', { class: 'help' }, 'Apply your import options to update this list.')); };
@@ -62,12 +69,20 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   files.addEventListener('change', safe(async () => {
     if (busy) return; busy = true; valid = false; saveButton.disabled = true;
     try {
-      workbooks = await readFiles(files.files, { signal: aborter.signal, onProgress: (i, count, name) => { if (active()) status.textContent = `Reading ${i + 1} of ${count}: ${name}`; } });
+      const added = await readFiles(files.files, { signal: aborter.signal, onProgress: (i, count, name) => { if (active()) status.textContent = `Reading ${i + 1} of ${count}: ${name}`; } });
       if (!active()) return;
+      // Adding the detail workbook must not require choosing every bank file again.
+      // In-month exports identify the card in the filename, even when their bytes match.
+      const key = book => JSON.stringify([book.name, book.fileHash || book.sheets]);
+      workbooks = [...new Map([...workbooks, ...added].map(book => [key(book), book])).values()];
       parsed = workbooks.map(book => parseBankWorkbook(book));
       existing = await db.all('expenses'); if (!active()) return;
       const savedMappings = deriveBankCardAliases(existing);
-      aliases = Object.assign({}, savedMappings.cardAliases, ...parsed.map(file => file.metadata?.suggestedCardAliases || file.metadata?.cardAliases || {}));
+      aliases = Object.assign({}, savedMappings.cardAliases, ...parsed.map(file => file.metadata?.suggestedCardAliases || file.metadata?.cardAliases || {}), aliases);
+      const dates = parsed.flatMap(file => file.rows.map(row => row.date).filter(Boolean)).sort();
+      const currencies = [...new Set(parsed.flatMap(file => file.metadata.currencies || []))].sort();
+      coverage.hidden = false;
+      coverage.textContent = `${workbooks.length} file${workbooks.length === 1 ? '' : 's'} added${dates.length ? ` · Dates in files: ${dates[0]} to ${dates.at(-1)}` : ''} · ${currencies.join(', ')}. Add more files with the same chooser; overlaps are checked together.`;
       const fileDetails = parsed.map(file => {
         const dates = file.rows.map(row => row.date).filter(Boolean).sort();
         return el('div', {}, el('strong', {}, file.metadata.fileName), el('small', {}, `${file.rows.length} source rows${dates.length ? ` · ${dates[0]} to ${dates.at(-1)}` : ''}`));
@@ -86,6 +101,11 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     } finally { busy = false; if (active()) updateSave(); }
   }));
   keepReferences.addEventListener('change', invalidate);
+  detailChoice.addEventListener('change', () => {
+    if (!valid) return;
+    for (const item of plan.filter(item => item.status === 'enrichment')) detailChoice.checked ? selected.add(item.id) : selected.delete(item.id);
+    paintRows();
+  });
   view.addEventListener('change', () => { page = 1; paintRows(); });
   bulkPurpose.addEventListener('change', () => {
     if (!bulkPurpose.value || !valid) return;
@@ -100,11 +120,21 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     existing = await db.all('expenses'); if (!active()) return;
     parsed = workbooks.map(book => parseBankWorkbook(book, { cardAliases: aliases }));
     plan = planBankImport(parsed, existing, { cardAliases: aliases, keepReferenceRows: keepReferences.checked });
-    edited = new Map(); selected = new Set(plan.filter(item => item.status === 'new').map(item => item.id));
+    // Preserve deliberate draft edits on rows that remain in the new preview.
+    edited = new Map([...edited].filter(([id]) => plan.some(item => item.id === id && ready(item))));
+    selected = new Set(plan.filter(item => item.status === 'new').map(item => item.id));
+    detailChoice.checked = false;
     valid = true; page = 1; status.classList.remove('error'); status.textContent = '';
     review.hidden = false; options.hidden = false;
     const counts = Object.fromEntries(['new', 'duplicate', 'possible-match', 'enrichment', 'excluded', 'error'].map(key => [key, plan.filter(item => item.status === key).length]));
     const needsReview = counts['possible-match'] + counts.enrichment;
+    detailsBatch.hidden = !counts.enrichment;
+    detailLabel.textContent = ` Add workbook details to ${counts.enrichment} existing transactions`;
+    exceptions.hidden = !counts['possible-match'] && !counts.error;
+    exceptions.replaceChildren(
+      counts['possible-match'] ? el('button', { type: 'button', class: 'link', onclick: () => { view.value = 'possible-match'; page = 1; review.open = true; paintRows(); } }, `${counts['possible-match']} possible duplicate${counts['possible-match'] === 1 ? '' : 's'} — check only these`) : null,
+      counts.error ? el('p', { class: 'error' }, `${counts.error} rows could not be read. Open Review transactions → Errors for details.`) : null,
+      counts['possible-match'] && !parsed.some(file => file.sourceType === 'spending-workbook') ? el('p', { class: 'help' }, 'Your detailed workbook can connect masked card numbers to the card names in other downloads. Add it above, or set the card names in Import options.') : null);
     summary.replaceChildren(el('p', {}, counts.new ? `${counts.new} transaction${counts.new === 1 ? '' : 's'} ready to import` : 'No new transactions'),
       el('small', {}, [[counts.duplicate, 'duplicates skipped'], [needsReview, 'need review'], [counts.error, 'cannot be imported'], [counts.excluded, 'excluded']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ')),
       ...(needsReview ? [el('small', { class: 'bank-review-needed' }, 'Review these before selecting them.')] : []));
@@ -187,7 +217,15 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       await atomicBatchSave(prepared.items, { label: `Import ${chosen.length} bank transactions / updates${matched ? ` · ${matched} matched to Work` : ''}`, ...(matched ? { expectedExpenses: latest } : {}) });
       if (!active()) return;
       dialog.close();
-      await onChange({ entry: prepared.items.find(item => !item.record.deleted)?.record, ...(matchWork ? { matched, matchMessage } : {}) });
+      const imported = prepared.items.filter(item => !item.record.deleted).map(item => item.record);
+      const months = [...new Set(imported.map(row => String(row.date || '').slice(0, 7)).filter(month => /^\d{4}-\d{2}$/.test(month)))].sort();
+      await onChange({ entry: imported.slice().sort((a, b) => String(b.date).localeCompare(String(a.date)))[0],
+        importSummary: { count: chosen.filter(item => item.status !== 'enrichment').length, updated: chosen.filter(item => item.status === 'enrichment').length,
+          duplicates: plan.filter(item => item.status === 'duplicate').length,
+          spendingCount: imported.filter(spending).length, referenceCount: imported.filter(row => !spending(row)).length,
+          workCount: imported.filter(row => spending(row) && row.spendingPurpose === 'business').length,
+          skippedReview: plan.filter(item => item.status === 'possible-match' && !selected.has(item.id)).length,
+          unread: plan.filter(item => item.status === 'error').length, months }, ...(matchWork ? { matched, matchMessage } : {}) });
       sync(); toast(`${chosen.length} transactions saved.${matched ? ` ${matched} matched to Work.` : ''} The whole import has one History Undo.${matchMessage ? ` ${matchMessage}` : ''}`);
     } finally { busy = false; if (active()) { body.inert = false; updateSave(); } }
   }));

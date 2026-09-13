@@ -41,6 +41,9 @@
 }
 
 .bank-import p,.bank-import .field,.bank-import details{margin:0}.bank-import summary{cursor:pointer}
+.bank-details-batch,.bank-import-exceptions{padding:12px;border:1px solid var(--rule);border-radius:8px;background:var(--surface-2)}
+.bank-details-batch>label{display:flex;gap:8px;align-items:flex-start;font-weight:600}.bank-details-batch input{width:18px;min-width:18px;min-height:18px;margin-top:2px}
+.bank-details-batch[hidden],.bank-import-exceptions[hidden],.bank-file-coverage[hidden]{display:none}
 .work-review { display:grid; gap:12px; min-width:0; }
 .work-review p,.work-review .field { margin:0; }
 .work-review-controls,.work-review-tabs { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }

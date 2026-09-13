@@ -1,21 +1,24 @@
 // A continuous personal ledger. Months and filters are views, never separate projects.
 import { live, db } from './db.js';
 import { currentScope, scopeIsCurrent } from './scope.js';
-import { el, download, toast } from './dom.js';
+import { el, download, toast, openDialog } from './dom.js';
 import { preparePersonalExpenses, openNewExpense, openExpense, supabaseClient, scheduleSync } from './expenses.js';
 import { openExpenseTools, openInbox, openBudgets } from './expense-tools.js';
 import { openActivity } from './workspace-ui.js';
 import { analyzePersonalMonth, exportPersonalMonthCsv } from './personal-analytics.js';
 import { renderPersonalStudy, analyzePersonalStudy } from './personal-study.js';
-import { filterPersonalViewRows, hasPersonalFilters } from './personal-filters.js';
+import { filterPersonalViewRows, hasPersonalFilters, effectiveSpendingPurpose } from './personal-filters.js';
 import { openBankImport, openBankTransaction } from './bank-ui.js';
 import { openWorkExpenseReview } from './work-match-ui.js';
 import { createWorkReconciler, matchImportedWorkPurchases } from './work-reconcile.js';
+import { readOnlyWorkContext } from './work-context.js';
+import { combineSpendingRows } from './spending-ledger.js';
 
 let ctx, preparation, host, view = 'overview', requestId = 0;
 let personalSession = 0, workReconciler, matching = false, matchStatus = null;
 let records = [], budgets = [], inboxCount = 0, conflictCount = 0;
-const state = { month: '', currency: '', filters: {}, page: 1 };
+let workSnapshot = null, ledger = { warnings: [], possibleDuplicates: [] }, workCoverage = null, importReceipt = null;
+const state = { month: '', currency: '', filters: {}, page: 1, excludeCompany: false, excludeTrips: false };
 const PAGE_SIZE = 25;
 const validMonth = month => /^\d{4}-(0[1-9]|1[0-2])$/.test(month) && Number(month.slice(0, 4)) >= 1000;
 const today = () => ctx.today?.() || new Intl.DateTimeFormat('en-CA', { timeZone: ctx.settings().timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -38,9 +41,11 @@ export function initPersonal(context) {
   ++requestId;
   ++personalSession;
   workReconciler?.dispose();
-  matching = false; matchStatus = null;
+  matching = false; matchStatus = null; workSnapshot = null; workCoverage = null; importReceipt = null;
+  ledger = { warnings: [], possibleDuplicates: [] };
   ctx = context;
   preparation = null; records = []; budgets = []; state.filters = {}; state.page = 1;
+  state.excludeCompany = false; state.excludeTrips = false;
   state.month = today().slice(0, 7);
   state.currency = ctx.settings().defaultCurrency || 'TRY';
   const session = personalSession;
@@ -51,6 +56,8 @@ export function initPersonal(context) {
 }
 export function refreshPersonal(change) {
   if (!scopeIsCurrent() || currentScope().workspace !== 'personal') return;
+  // Refreshes reload Work once; changing a view or filter reuses the same snapshot.
+  workSnapshot = null;
   // Keep a saved purchase visible when its date/currency moves outside this view.
   if (change?.entry && validMonth(String(change.entry.date || '').slice(0, 7)) && /^[A-Z]{3}$/.test(change.entry.currency || '')) {
     state.month = change.entry.date.slice(0, 7); state.currency = change.entry.currency;
@@ -58,11 +65,20 @@ export function refreshPersonal(change) {
   }
   if (host?.isConnected && !host.hidden && currentScope().workspace === 'personal') return renderPersonal(host, view);
 }
+function includedRows() {
+  return records.filter(row => !(state.excludeCompany && row.ledgerWork) && !(state.excludeTrips && row.ledgerTrip));
+}
+function loadWorkSnapshot() {
+  workSnapshot ||= Promise.resolve().then(() => readOnlyWorkContext()).catch(() => ({
+    expenses: [], sheets: [], trips: [], source: 'unavailable',
+    notice: 'Work could not be loaded. Your Personal records are still shown; the combined total is incomplete. Use Refresh all spending to try again.',
+  }));
+  return workSnapshot;
+}
 function analysis() {
-  // Keep the full bank ledger available in Transactions and Study. The Summary
-  // removes bank charges classified as Work, including verified Work matches.
-  const rows = view === 'overview' ? records.filter(row => !(row.bankTransaction && row.spendingPurpose === 'business')) : records;
-  const options = { month: state.month, today: today(), currency: state.currency, categories: ctx.settings().expenseCodes, complete: true };
+  const rows = includedRows();
+  const complete = workCoverage?.source === 'cloud' && !workCoverage.notice && !ledger.possibleDuplicates?.length;
+  const options = { month: state.month, today: today(), currency: state.currency, categories: ctx.settings().expenseCodes, complete };
   const full = analyzePersonalMonth(rows, options);
   const chosen = analyzePersonalMonth(filterPersonalViewRows(rows, state.filters, options.categories), options);
   return { ...chosen, totalEntryCount: full.entries.length, filterOptions: full, currencyTotals: full.currencyTotals,
@@ -107,6 +123,20 @@ async function importBank() {
     onChange: change => {
       if (!isCurrent()) return;
       if (change?.matchMessage) matchStatus = { state: change.matched ? 'matched' : 'complete', message: change.matchMessage, matched: change.matched || 0 };
+      if (change?.importSummary) {
+        importReceipt = { ...change.importSummary };
+        const months = (importReceipt.months || []).filter(validMonth).sort();
+        const latest = months.at(-1);
+        const refreshed = { ...change };
+        if (latest && (!change.entry || latest !== String(change.entry.date || '').slice(0, 7))) {
+          refreshed.entry = { date: latest + '-01', currency: change.entry?.currency || state.currency };
+        }
+        // Finishing import brings the answers into view, even when it began in Transactions.
+        workSnapshot = null; state.filters = {}; state.page = 1;
+        if (refreshed.entry && validMonth(String(refreshed.entry.date || '').slice(0, 7))) state.month = refreshed.entry.date.slice(0, 7);
+        if (/^[A-Z]{3}$/.test(refreshed.entry?.currency || '')) state.currency = refreshed.entry.currency;
+        return ctx.navigateView ? ctx.navigateView('overview') : renderPersonal(host, 'overview');
+      }
       return refreshPersonal(change);
     },
     sync: () => { if (isCurrent()) scheduleSync(); },
@@ -145,12 +175,24 @@ async function matchWithWork() {
 export function reviewPersonal(kind = 'bank') { if (currentScope().workspace === 'personal') return act(kind === 'inbox' ? openInbox : reviewBank)(); }
 function editEntry(entry) {
   const row = entry.source || entry;
+  if (row.ledgerReadOnly || row.sourceWorkspace === 'work') {
+    if (!scopeIsCurrent()) return;
+    if (ctx.openWorkExpense) return ctx.openWorkExpense(row.workSourceId);
+    const amount = Number(row.amount), currency = /^[A-Z]{3}$/.test(row.currency || '') ? row.currency : state.currency;
+    const minor = Number.isSafeInteger(entry.signedMinor) ? entry.signedMinor : Number.isSafeInteger(row.amountMinor)
+      ? (row.kind === 'refund' ? -Math.abs(row.amountMinor) : row.amountMinor) : Number.isFinite(amount) ? Math.round(amount * 100) : null;
+    return openDialog('Recorded in Work', el('div', {},
+      el('p', {}, row.merchant || row.vendor || row.written || 'Work expense'),
+      el('p', {}, `${row.date || ''} · ${minor == null ? 'Amount unavailable' : cash(minor, currency)}`),
+      row.ledgerTripName ? el('p', {}, 'Trip: ' + row.ledgerTripName) : null,
+      el('p', {}, 'This is the original Work expense shown in your spending. Edit it in Work; it has not been copied into Personal.')));
+  }
   return row.bankTransaction ? openBankTransaction(row.id, { settings: ctx.settings, onChange: refreshPersonal, sync: scheduleSync }) : openExpense(row.id);
 }
 function exportMonth() {
-  const csv = exportPersonalMonthCsv(records, { month: state.month, categories: ctx.settings().expenseCodes });
+  const csv = exportPersonalMonthCsv(includedRows(), { month: state.month, categories: ctx.settings().expenseCodes });
   download(`personal-spending-${state.month}.csv`, csv, 'text/csv;charset=utf-8');
-  toast('Exported this month in all recorded currencies and purposes, including Work.');
+  toast('Exported this month in all currencies, using the company and trip exclusions above. Other filters do not change the month export.');
 }
 
 export async function renderPersonal(root, nextView = 'overview') {
@@ -165,29 +207,74 @@ export async function renderPersonal(root, nextView = 'overview') {
     const session = personalSession;
     preparation ||= preparePersonalExpenses({ onChange: change => { if (session === personalSession && scopeIsCurrent()) return refreshPersonal(change); } }).catch(error => { if (session === personalSession) preparation = null; throw error; });
     await preparation;
-    const loaded = await Promise.all([live('expenses'), live('inbox'), db.all('conflicts'), live('budgets')]);
+    const loaded = await Promise.all([live('expenses'), live('inbox'), db.all('conflicts'), live('budgets'), loadWorkSnapshot()]);
     if (ticket !== requestId || !scopeIsCurrent()) return;
-    records = loaded[0];
+    workCoverage = loaded[4];
+    try { ledger = combineSpendingRows(loaded[0], workCoverage); }
+    catch {
+      // Invalid Work data must not take the usable Personal ledger away.
+      ledger = combineSpendingRows(loaded[0], { expenses: [], trips: [], sheets: [] });
+      workCoverage = { source: 'unavailable', notice: 'Work records could not be combined. Your Personal records are shown; the combined total is incomplete. Use Refresh all spending to try again.' };
+    }
+    records = ledger.rows;
     budgets = loaded[3];
     inboxCount = loaded[1].filter(item => !['created', 'matched', 'done', 'imported'].includes(item.status)).length;
     conflictCount = loaded[2].length;
     const model = analysis();
     state.currency = model.currency;
-    root.replaceChildren(toolbar(model), sharedFilters(model));
+    root.replaceChildren(toolbar(model), spendingScope(), sharedFilters(model));
+    if (importReceipt) root.append(importSummaryPanel());
+    const coverageWarnings = [...(ledger.warnings || [])];
+    if (workCoverage?.source !== 'cloud') coverageWarnings.unshift(workCoverage?.notice || 'Work is available only from this device. The combined view may be incomplete.');
+    else if (workCoverage.notice) coverageWarnings.unshift(workCoverage.notice);
+    if (ledger.possibleDuplicates?.length) coverageWarnings.unshift('May include duplicates: some bank purchases and Work expenses could be the same charge. They remain included until their relationship is clear.');
+    if (coverageWarnings.length) root.append(el('div', { class: 'personal-warning', role: 'status', 'data-spending-coverage': '' }, ...[...new Set(coverageWarnings)].map(text => el('p', {}, text))));
     if (model.warnings?.length) root.append(el('div', { class: 'personal-warning', role: 'alert' }, ...model.warnings.map(text => el('p', {}, text))));
-    if (view === 'study') root.append(renderPersonalStudy({ rows: records, month: state.month, currency: state.currency,
+    if (view === 'study') root.append(renderPersonalStudy({ rows: includedRows(), month: state.month, currency: state.currency,
       categories: ctx.settings().expenseCodes, budgets, filters: state.filters, sharedFilters: true,
       onFiltersChange: change => { if (scopeIsCurrent()) { state.filters = { ...state.filters, ...change }; state.page = 1; renderPersonal(host, view); } },
       onOpenEntry: entry => act(() => editEntry(entry))(), onOpenBudgets: act(openBudgets) }));
     else if (view === 'transactions') root.append(transactionPanel(model));
     else root.append(...overview(model));
-    root.append(el('p', { class: 'personal-footnote' }, view === 'overview' ? 'Work charges excluded. Unmatched charges included.' : 'All transactions, including Work.'));
+    root.append(el('p', { class: 'personal-footnote' }, 'Personal and Work records are shown together. Clear matches count once. Currencies stay separate. Refunds reduce spending in the month received.'));
   } catch (error) {
     if (ticket !== requestId || !scopeIsCurrent()) return;
     root.replaceChildren(el('div', { class: 'empty', role: 'alert' }, el('h3', {}, 'Spending could not be loaded'), el('p', {}, error.message), button('Try again', () => renderPersonal(root, nextView))));
   } finally { if (ticket === requestId) root.removeAttribute('aria-busy'); }
 }
 
+function spendingScope() {
+  const toggle = (label, key) => {
+    const input = el('input', { type: 'checkbox', checked: state[key], onchange: () => {
+      if (!scopeIsCurrent()) return; state[key] = input.checked; state.page = 1; renderPersonal(host, view);
+    } });
+    return el('label', {}, input, el('span', {}, label));
+  };
+  const scopeText = state.excludeCompany || state.excludeTrips
+    ? [state.excludeCompany ? 'Company costs excluded' : 'Company costs included', state.excludeTrips ? 'Trip costs excluded' : 'Trip costs included'].join(' · ')
+    : 'All spending, including company and trip costs';
+  return el('section', { class: 'personal-spending-scope', 'aria-label': 'Spending included' },
+    el('div', { class: 'personal-scope-options' }, toggle('Exclude company costs', 'excludeCompany'), toggle('Exclude trip costs', 'excludeTrips')),
+    el('small', { 'data-spending-scope': '' }, scopeText + '. Applies to Spending, Transactions, Study and month export.'));
+}
+function importSummaryPanel() {
+  const summary = importReceipt, months = (summary.months || []).filter(validMonth).sort();
+  const number = value => Number.isSafeInteger(value) && value > 0 ? value : 0;
+  const rows = value => `${number(value)} row${number(value) === 1 ? '' : 's'}`;
+  const parts = [`${number(summary.count)} added`];
+  if (number(summary.updated)) parts.push(`${summary.updated} updated`);
+  if (number(summary.duplicates)) parts.push(`${summary.duplicates} already imported`);
+  if (number(summary.referenceCount)) parts.push(`${summary.referenceCount} payments or other bank movements kept outside spending`);
+  if (number(summary.workCount)) parts.push(`${summary.workCount} Work charges identified`);
+  const problems = number(summary.skippedReview) + number(summary.unread);
+  return el('section', { class: 'personal-import-receipt', 'data-import-receipt': '', role: 'status' },
+    el('div', { class: 'personal-panel-head' }, el('h3', {}, problems ? 'Import saved · some rows still need attention' : 'Import saved · your spending is ready to explore'),
+      button('Dismiss', () => { importReceipt = null; host.querySelector('[data-import-receipt]')?.remove(); }, { class: 'link' })),
+    el('p', {}, parts.join(' · ')),
+    problems ? el('p', {}, `${rows(summary.skippedReview)} ${number(summary.skippedReview) === 1 ? 'needs' : 'need'} review · ${rows(summary.unread)} could not be imported. These are not included in your total.`) : null,
+    el('div', { class: 'personal-import-months' }, ...months.map(month => button(monthLabel(month), () => setMonth(month), { class: 'link', 'aria-current': month === state.month ? 'date' : null })),
+      button('History / Undo import', act(openActivity), { class: 'link' })));
+}
 function toolbar(model) {
   const month = el('input', { type: 'month', value: state.month, min: '1000-01', max: '9999-12', 'aria-label': 'Spending month', onchange: () => { if (setMonth(month.value) === false) month.value = state.month; } });
   const currencyCodes = [...new Set([...(ctx.settings().currencies || []), ...model.currencyTotals.map(item => item.currency), ...records.filter(row => !row.deleted && /^[A-Z]{3}$/.test(row.currency || '')).map(row => row.currency), state.currency])];
@@ -200,7 +287,7 @@ function toolbar(model) {
     item('+ Add expense', newEntry),
     item(matching ? 'Checking Work…' : 'Match with Work', matchWithWork, { 'data-match-with-work': '', disabled: matching }),
     item('Review exceptions', reviewBank),
-    item('Spending details', () => ctx.navigateView ? ctx.navigateView('study') : renderPersonal(host, 'study')),
+    item('Refresh all spending', () => refreshPersonal()),
     item('Export month · all currencies', exportMonth, { disabled: !model.currencyTotals.some(entry => entry.count) }),
     item('History', openActivity), item('Other tools', openExpenseTools),
     item('This month', () => setMonth(today().slice(0, 7)), { disabled: state.month === today().slice(0, 7) }),
@@ -218,7 +305,7 @@ function toolbar(model) {
 }
 function sharedFilters(model) {
   const full = model.filterOptions;
-  const study = analyzePersonalStudy(records, { month: state.month, currency: state.currency, categories: ctx.settings().expenseCodes });
+  const study = analyzePersonalStudy(includedRows(), { month: state.month, currency: state.currency, categories: ctx.settings().expenseCodes });
   const update = (key, value) => { if (!scopeIsCurrent()) return; state.filters[key] = value; state.page = 1; renderPersonal(host, view); };
   const clear = () => { if (!scopeIsCurrent()) return; state.filters = {}; state.page = 1; renderPersonal(host, view); };
   // Keep a selected value visible even if it has no matches on this page.
@@ -252,22 +339,18 @@ function metricCard(label, value, detail, run, primary = false) {
 }
 function overview(model) {
   const t = model.selectedTotals;
-  const summary = el('div', { class: 'personal-metrics personal-main-total' },
-    metricCard('Spent this month', cash(t.netMinor), `${t.count} transaction${t.count === 1 ? '' : 's'} · after refunds`, () => navigateTransactions(), true));
-  const details = el('details', { class: 'personal-extra-details' }, el('summary', {}, 'More details'),
-    el('div', { class: 'personal-extra-content' },
-      el('div', { class: 'personal-metrics personal-secondary-metrics' },
-        metricCard('Purchases', cash(t.purchasesMinor), 'Before refunds', () => navigateTransactions({ kind: 'purchase' })),
-        metricCard('Refunds', cash(t.refundsMinor), 'Money returned this month', () => navigateTransactions({ kind: 'refund' }))),
-      comparisonPanel(model), dailyPanel(model), breakdown('Top merchants', model.merchants, 'merchant'),
-      el('p', { class: 'personal-footnote' }, 'Currencies stay separate. Refunds reduce spending in the month received.')));
+  const summary = el('div', { class: 'personal-metrics' },
+    metricCard('Spent this month', cash(t.netMinor), `${t.count} transaction${t.count === 1 ? '' : 's'} · after refunds`, () => navigateTransactions(), true),
+    metricCard('Purchases', cash(t.purchasesMinor), 'Before refunds', () => navigateTransactions({ kind: 'purchase' })),
+    metricCard('Refunds', cash(t.refundsMinor), 'Money returned this month', () => navigateTransactions({ kind: 'refund' })));
   const others = el('div', { class: 'personal-other-currencies' }, ...model.currencyTotals.filter(item => item.currency !== state.currency && item.count).map(item => button(`${item.currency}: ${cash(item.netMinor, item.currency)} · full month`, () => setCurrency(item.currency), { class: 'link' })));
   if (model.coverage.monthEntryCount && !model.entries.length) return [summary, others, el('section', { class: 'personal-panel personal-empty' }, el('h3', {}, `No ${state.currency} transactions this month`), el('p', {}, 'Choose a recorded currency above to see its spending.'))];
   if (!model.entries.length && hasPersonalFilters(state.filters)) return [summary, others, el('section', { class: 'personal-panel personal-empty' }, el('h3', {}, 'No matching transactions'), el('p', {}, 'The filters above apply to this summary. Clear them to see the full month.'))];
   if (!model.entries.length) return [summary, others, el('section', { class: 'personal-panel personal-empty' },
     el('h3', {}, 'No spending yet'), el('p', {}, 'Use Import statement above to add your bank file.'))];
-  return [summary, others,
-    el('div', { class: 'personal-breakdowns' }, breakdown('By category', model.categories, 'category'), recentPanel(model)), details];
+  return [summary, others, comparisonPanel(model), dailyPanel(model),
+    el('div', { class: 'personal-breakdowns' }, breakdown('By category', model.categories, 'category'), breakdown('Top merchants', model.merchants, 'merchant')),
+    recentPanel(model)];
 }
 function comparisonPanel(model) {
   const c = model.comparison;
@@ -305,12 +388,13 @@ function breakdown(title, groups, field) {
     el('small', {}, 'Amounts after refunds; bars show share of purchases.'), body);
 }
 function entryRow(entry) {
-  const row = button('', act(() => editEntry(entry)), { class: 'personal-entry', 'aria-label': `Edit ${entry.merchant || entry.category}, ${dateLabel(entry.date)}, ${cash(entry.signedMinor, entry.currency)}` });
+  const row = button('', act(() => editEntry(entry)), { class: 'personal-entry', 'aria-label': `${entry.source?.ledgerReadOnly ? 'View' : 'Edit'} ${entry.merchant || entry.category}, ${dateLabel(entry.date)}, ${cash(entry.signedMinor, entry.currency)}` });
   const link = entry.source?.workExpenseLink;
-  const purpose = entry.source?.spendingPurpose === 'business' && link?.method === 'automatic' && link.workspace === 'work' && link.expenseId
-    ? 'Matched with Work' : ({ business: 'Work', personal: 'Personal', review: 'Needs review' }[entry.source?.spendingPurpose] || 'Needs review');
+  const effectivePurpose = effectiveSpendingPurpose(entry.source || entry);
+  const purpose = effectivePurpose === 'business' && (entry.source?.ledgerMatch || link?.method === 'automatic' && link.workspace === 'work' && link.expenseId)
+    ? 'Matched with Work' : ({ business: 'Work', personal: 'Personal', review: 'Needs review' }[effectivePurpose] || 'Needs review');
   row.append(el('span', { class: 'personal-entry-date' }, dateLabel(entry.date)),
-    el('span', { class: 'personal-entry-description' }, el('strong', {}, entry.merchant || entry.category), el('small', {}, `${entry.category}${entry.kind === 'refund' ? ' · Refund' : ''}${entry.source?.bankTransaction ? ' · ' + purpose : ''}`), entry.note ? el('span', { class: 'personal-entry-note' }, entry.note) : null),
+    el('span', { class: 'personal-entry-description' }, el('strong', {}, entry.merchant || entry.category), el('small', {}, `${entry.category}${entry.kind === 'refund' ? ' · Refund' : ''}${entry.source?.ledgerReadOnly ? ' · Recorded in Work' : entry.source?.bankTransaction ? ' · ' + purpose : ''}${entry.source?.ledgerTripName ? ' · ' + entry.source.ledgerTripName : ''}`), entry.note ? el('span', { class: 'personal-entry-note' }, entry.note) : null),
     el('strong', { class: 'amt' + (entry.kind === 'refund' ? ' personal-refund' : '') }, cash(entry.signedMinor, entry.currency)), el('span', { class: 'personal-edit-hint', 'aria-hidden': 'true' }, '›'));
   return row;
 }

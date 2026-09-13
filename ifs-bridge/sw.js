@@ -1,5 +1,5 @@
 // Only public app assets enter the offline cache. Backups and receipt APIs never do.
-const CACHE = 'ifsbridge-v47-test-1';
+const CACHE = 'ifsbridge-v48-test-1';
 const SHELL = ['./', './index.html', './css/app.css', './css/expense-tools.css', './js/app.js', './js/shell.js', './js/scope.js', './js/workspace-ui.js', './js/expense-tools.js', './js/expense-workflows.js', './js/rules.js', './js/ifs.js', './js/clockify.js', './js/store.js', './js/dom.js', './js/db.js', './js/supabase.js', './js/sync.js', './js/expense-ifs.js', './js/expenses.js', './js/localbackup.js', './js/week-status.js', './js/ocr.js', './js/report.js', './manifest.webmanifest', './icons/icon-192.png'];
 SHELL.push('./css/personal.css', './js/personal.js', './js/personal-analytics.js', './js/settings-transfer.js');
 SHELL.push('./css/auth.css', './css/bank-import.css', './css/personal-study.css', './js/bank-ui.js', './js/bank-import.js', './js/bank-files.js', './js/bank-reader-worker.js', './js/personal-study.js', './vendor/xlsx-0.20.3.full.min.js');
@@ -7,6 +7,7 @@ SHELL.push('./js/mfa-ui.js', './js/work-match.js', './js/work-match-ui.js', './j
 SHELL.push('./js/time-codes.js');
 SHELL.push('./js/work-policy.js', './js/account-settings.js', './js/account-preferences.js', './js/sick-benefit.js', './js/leave-entry.js', './supabase/account-settings-v4.sql');
 SHELL.push('./js/work-reconcile.js');
+SHELL.push('./js/spending-ledger.js');
 SHELL.push('./css/settings.css', './css/settings-time.css', './css/review.css', './js/settings-ui.js', './js/settings-model.js', './js/settings-time.js', './js/settings-projects.js', './js/review-queue.js', './js/review-ui.js', './js/personal-filters.js');
 SHELL.push('./js/site-config.js');
 const paths = new Set(SHELL.map(path => new URL(path, self.registration.scope).pathname));
