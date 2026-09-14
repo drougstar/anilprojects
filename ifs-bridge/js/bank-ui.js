@@ -3,6 +3,8 @@ import { assertScopeCurrent, scopeIsCurrent, currentScope } from './scope.js';
 import { el, field, openDialog, toast, confirmButton } from './dom.js';
 import { parseBankWorkbook, planBankImport, deriveBankCardAliases } from './bank-import.js';
 import { readBankFiles } from './bank-files.js';
+import { suggestImportCategories } from './import-categories.js';
+import { requestImportCategorySuggestions } from './import-ai.js';
 
 const purposes = [['review', 'Needs review'], ['personal', 'Personal'], ['business', 'Business']];
 const kinds = { purchase: 'Purchase', refund: 'Refund', fee: 'Bank charge', payment: 'Card repayment', transfer: 'FX / balance transfer', financing: 'Statement financing', pending: 'Pending authorization', reward: 'Reward points', unknown: 'Unrecognized' };
@@ -30,11 +32,14 @@ export function bankExpenseRecord(item, { sheet, settings, batchId, at }) {
   return record;
 }
 
-export async function openBankImport({ settings, sheet, onChange = () => {}, sync = () => {}, readFiles = readBankFiles, matchWork }) {
+export async function openBankImport({ settings, sheet, onChange = () => {}, sync = () => {}, readFiles = readBankFiles, matchWork, aiClient = null }) {
   assertScopeCurrent();
   const currentSettings = typeof settings === 'function' ? settings : () => settings;
   const aborter = new AbortController();
   let workbooks = [], parsed = [], plan = [], selected = new Set(), edited = new Map(), aliases = {}, existing = [], busy = false, valid = false, page = 1;
+  let categoryGroups = [], categoryDrafts = new Map(), categoryUndo = null;
+  let aiBusy = false, previewRevision = 0, aiReviewed = new Set();
+  const personalImport = currentScope().workspace === 'personal';
   const status = el('p', { class: 'help', role: 'status' });
   const mappingHost = el('div'), preview = el('div'), sources = el('div', { class: 'bank-source-list' }), warnings = el('div', { class: 'bank-import-notes' });
   const files = el('input', { type: 'file', accept: '.xls,.xlsx', multiple: true, 'aria-label': 'Bank Excel files' });
@@ -42,6 +47,12 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   const view = pick([['new', 'Ready to import'], ['possible-match', 'Needs duplicate review'], ['enrichment', 'New workbook details'], ['duplicate', 'Duplicates'], ['excluded', 'Excluded'], ['error', 'Errors'], ['all', 'All source rows']], 'new', 'Import review filter');
   const saveButton = el('button', { type: 'button', class: 'primary', disabled: true }, 'Import');
   const summary = el('div', { class: 'bank-import-summary' });
+  const categoryBody = el('div', { class: 'bank-category-body' });
+  const categoryTitle = el('summary', {}, 'Categories');
+  const categoryPanel = el('details', { class: 'bank-category-suggestions', hidden: true }, categoryTitle, categoryBody);
+  const categoryView = pick([['suggested', 'Suggested categories'], ['all', 'All merchant groups']], 'suggested', 'Category groups');
+  const categorySearch = el('input', { type: 'search', placeholder: 'Find a merchant', 'aria-label': 'Find a category group' });
+  const categoryFeedback = el('p', { class: 'help', role: 'status' });
   const coverage = el('p', { class: 'help bank-file-coverage', hidden: true });
   const detailChoice = el('input', { type: 'checkbox', 'aria-label': 'Add all matching workbook details' });
   const detailLabel = el('span');
@@ -59,15 +70,15 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     el('p', { class: 'help' }, 'Select your bank downloads together: TL, USD, EUR, statements and in-month transactions. You can include your detailed spending workbook too. No Excel editing or CSV conversion needed.'),
     field('Add your files', files), coverage,
     matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear Work matches are handled automatically.') : null,
-    summary, detailsBatch, exceptions, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
+    summary, personalImport ? categoryPanel : null, detailsBatch, exceptions, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
   const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
   const active = () => scopeIsCurrent() && dialog.open && dialog.isConnected && !aborter.signal.aborted;
-  const invalidate = () => { valid = false; selected.clear(); saveButton.disabled = true; status.textContent = 'Options changed. Apply options to continue.'; preview.replaceChildren(el('p', { class: 'help' }, 'Apply your import options to update this list.')); };
+  const invalidate = () => { previewRevision++; valid = false; selected.clear(); saveButton.disabled = true; status.textContent = 'Options changed. Apply options to continue.'; preview.replaceChildren(el('p', { class: 'help' }, 'Apply your import options to update this list.')); };
   const fail = error => { if (active()) { status.textContent = error.message || 'Could not read the files.'; status.classList.add('error'); } };
   const safe = run => async () => { try { assertScopeCurrent(); await run(); } catch (error) { fail(error); } };
 
   files.addEventListener('change', safe(async () => {
-    if (busy) return; busy = true; valid = false; saveButton.disabled = true;
+    if (busy || aiBusy) return; busy = true; valid = false; saveButton.disabled = true;
     try {
       const added = await readFiles(files.files, { signal: aborter.signal, onProgress: (i, count, name) => { if (active()) status.textContent = `Reading ${i + 1} of ${count}: ${name}`; } });
       if (!active()) return;
@@ -98,7 +109,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       mappingHost.replaceChildren(el('div', { class: 'bank-card-mapping' },
         el('p', { class: 'help' }, 'Use the same label for each card across its downloads.'), el('div', { class: 'grid2' }, cardFields)));
       await buildPreview();
-    } finally { busy = false; if (active()) updateSave(); }
+    } finally { busy = false; if (active()) { paintCategories(); updateSave(); } }
   }));
   keepReferences.addEventListener('change', invalidate);
   detailChoice.addEventListener('change', () => {
@@ -114,8 +125,101 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     }
     bulkPurpose.value = ''; paintRows();
   });
+  categoryView.addEventListener('change', paintCategories);
+  categorySearch.addEventListener('input', paintCategories);
+
+  // A category choice only edits this import preview. Import remains the single
+  // record write and History Undo; bank descriptions and labels are preserved.
+  function applyCategories(groups, useDrafts = true) {
+    if (!personalImport || !valid || busy || aiBusy || !active()) return;
+    const before = new Map(); let count = 0;
+    for (const group of groups) {
+      const category = String(useDrafts ? categoryDrafts.get(group.id) ?? group.category : group.category).trim();
+      if (!category) continue;
+      for (const id of group.itemIds) {
+        const item = plan.find(candidate => candidate.id === id);
+        if (!selected.has(id) || !item || !['new', 'possible-match'].includes(item.status)) continue;
+        const prior = edited.get(id);
+        if (prior?.bankReviewFields?.includes('personalCategory')) continue;
+        before.set(id, prior ? structuredClone(prior) : null);
+        edited.set(id, { ...prior, personalCategory: category, categoryProvenance: 'user correction',
+          bankReviewFields: [...new Set([...(prior?.bankReviewFields || []), 'personalCategory'])] });
+        count++;
+      }
+    }
+    if (count) categoryUndo = before;
+    categoryFeedback.textContent = count ? `${count} transaction${count === 1 ? '' : 's'} updated in this preview. Import when ready.` : 'No selected transactions need this change.';
+    paintCategories(); paintRows();
+  }
+  function undoCategories() {
+    if (!categoryUndo || busy || aiBusy || !active()) return;
+    for (const [id, before] of categoryUndo) {
+      const current = { ...edited.get(id) };
+      // Keep any purpose edits made after categorizing the group.
+      for (const field of ['personalCategory', 'categoryProvenance']) before && Object.hasOwn(before, field) ? current[field] = before[field] : delete current[field];
+      current.bankReviewFields = (current.bankReviewFields || []).filter(field => field !== 'personalCategory');
+      if (before?.bankReviewFields?.includes('personalCategory')) current.bankReviewFields.push('personalCategory');
+      edited.set(id, current);
+    }
+    categoryUndo = null; categoryFeedback.textContent = 'Last category change undone.'; paintCategories(); paintRows();
+  }
+  function paintCategories() {
+    if (!personalImport || !valid || !active()) return;
+    const focusedSearch = document.activeElement === categorySearch;
+    const selection = focusedSearch ? [categorySearch.selectionStart, categorySearch.selectionEnd] : null;
+    const suggestions = categoryGroups.filter(group => group.category);
+    categoryPanel.hidden = !categoryGroups.length;
+    categoryTitle.textContent = suggestions.length ? `Categories · ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}` : 'Categories · group by merchant';
+    const needle = categorySearch.value.trim().toLocaleLowerCase();
+    const groups = categoryGroups.filter(group => (categoryView.value === 'all' || group.category) && (!needle || group.merchant.toLocaleLowerCase().includes(needle)));
+    const list = el('div', { class: 'bank-category-groups' });
+    for (const [index, group] of groups.entries()) {
+      const ids = group.itemIds.filter(id => selected.has(id) && !edited.get(id)?.bankReviewFields?.includes('personalCategory'));
+      const input = el('input', { value: categoryDrafts.get(group.id) ?? group.category, maxlength: 80, placeholder: 'Choose a category', 'aria-label': `Group category ${index + 1}` });
+      input.addEventListener('input', () => { categoryDrafts.set(group.id, input.value); });
+      list.append(el('div', { class: 'bank-category-group' },
+        el('div', {}, el('strong', {}, group.merchant), el('small', {}, `${group.currency} · ${group.itemIds.length} transaction${group.itemIds.length === 1 ? '' : 's'} · Bank/import label: ${group.currentCategory}`), el('p', { class: 'help' }, group.reason)),
+        field('Your category', input), el('button', { type: 'button', disabled: !ids.length, onclick: () => applyCategories([group]) }, ids.length ? `Use for ${ids.length}` : 'Applied / not selected')));
+    }
+    if (!groups.length) list.append(el('p', { class: 'help' }, 'No suggestions here. Choose All merchant groups to set a category for several transactions together.'));
+    const aiGroups = pendingAiGroups();
+    categoryBody.replaceChildren(el('p', { class: 'help' }, 'Local suggestions use merchant descriptions and your previous corrections. Bank labels stay in the original record. Choose the categories you want before importing.'),
+      el('div', { class: 'bank-category-ai' },
+        el('button', { type: 'button', disabled: aiBusy || busy || !aiGroups.length, onclick: askAi }, aiBusy ? 'Getting AI suggestions…' : 'Suggest with AI'),
+        el('small', {}, `Sends up to ${Math.min(aiGroups.length, 200)} selected merchant groups, sample amounts, currencies and bank labels to OpenAI. Suggestions need your approval. No files or card details are uploaded.`)),
+      el('div', { class: 'bank-category-controls' }, categoryView, categorySearch,
+        el('button', { type: 'button', disabled: !suggestions.length, onclick: () => applyCategories(suggestions) }, 'Use suggested categories'),
+        el('button', { type: 'button', disabled: !categoryUndo, onclick: undoCategories }, 'Undo category change')),
+      list, categoryFeedback);
+    if (focusedSearch) { categorySearch.focus({ preventScroll: true }); categorySearch.setSelectionRange(...selection); }
+  }
+
+  function pendingAiGroups() {
+    return categoryGroups.filter(group => group.source !== 'user-history' && !aiReviewed.has(group.id) && !categoryDrafts.has(group.id))
+      .map(group => ({ ...group, itemIds: group.itemIds.filter(id => selected.has(id) && !edited.get(id)?.bankReviewFields?.includes('personalCategory')) }))
+      .filter(group => group.itemIds.length);
+  }
+  async function askAi() {
+    if (!personalImport || !valid || busy || aiBusy || !active()) return;
+    const groups = pendingAiGroups().slice(0, 200), revision = previewRevision;
+    if (!groups.length) return;
+    aiBusy = true; files.disabled = true; categoryFeedback.textContent = 'Getting category suggestions…'; paintCategories(); updateSave();
+    try {
+      const client = typeof aiClient === 'function' ? aiClient() : aiClient;
+      const suggestions = await requestImportCategorySuggestions(client, groups, plan.map(item => ({ ...item, row: currentRow(item) })), { signal: aborter.signal, isCurrent: () => active() && valid && revision === previewRevision });
+      if (!active() || !valid || revision !== previewRevision) return;
+      const byId = new Map(suggestions.map(group => [group.id, group]));
+      // A draft typed while the request was running remains the user's choice.
+      categoryGroups = categoryGroups.map(group => byId.has(group.id) && !categoryDrafts.has(group.id) ? { ...group, ...byId.get(group.id) } : group);
+      for (const group of suggestions) aiReviewed.add(group.id);
+      categoryView.value = 'suggested';
+      categoryFeedback.textContent = `${suggestions.filter(group => group.category).length} AI category suggestions ready. Review them, then use the ones you want.`;
+    } catch (error) { if (active() && revision === previewRevision) categoryFeedback.textContent = error.message || 'AI is unavailable. Your import is unchanged.'; }
+    finally { aiBusy = false; if (active()) { files.disabled = false; paintCategories(); updateSave(); } }
+  }
 
   async function buildPreview() {
+    previewRevision++;
     if (!workbooks.length) throw Error('Choose your Excel exports first.');
     existing = await db.all('expenses'); if (!active()) return;
     parsed = workbooks.map(book => parseBankWorkbook(book, { cardAliases: aliases }));
@@ -125,6 +229,14 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     selected = new Set(plan.filter(item => item.status === 'new').map(item => item.id));
     detailChoice.checked = false;
     valid = true; page = 1; status.classList.remove('error'); status.textContent = '';
+    if (personalImport) {
+      categoryGroups = suggestImportCategories(plan.map(item => ({ ...item, row: { ...item.row, ...edited.get(item.id) } })), existing);
+      categoryDrafts = new Map([...categoryDrafts].filter(([id]) => categoryGroups.some(group => group.id === id)));
+      categoryUndo = null; categoryFeedback.textContent = '';
+      aiReviewed = new Set();
+      if (!categoryGroups.some(group => group.category)) categoryView.value = 'all';
+      paintCategories();
+    }
     review.hidden = false; options.hidden = false;
     const counts = Object.fromEntries(['new', 'duplicate', 'possible-match', 'enrichment', 'excluded', 'error'].map(key => [key, plan.filter(item => item.status === key).length]));
     const needsReview = counts['possible-match'] + counts.enrichment;
@@ -143,7 +255,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   }
   function currentRow(item) { return { ...item.row, ...edited.get(item.id) }; }
   function updateSave() {
-    saveButton.disabled = !valid || !selected.size || busy;
+    saveButton.disabled = !valid || !selected.size || busy || aiBusy;
     saveButton.textContent = selected.size ? `Import ${selected.size} transaction${selected.size === 1 ? '' : 's'}` : 'Import';
     if (valid && summary.firstElementChild) summary.firstElementChild.textContent = selected.size ? `${selected.size} transaction${selected.size === 1 ? '' : 's'} ready to import` : 'No transactions selected';
   }
@@ -156,7 +268,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     for (const [offset, item] of chosen.slice((page - 1) * 25, page * 25).entries()) {
       const row = currentRow(item), enabled = ready(item), position = (page - 1) * 25 + offset + 1;
       const cb = el('input', { type: 'checkbox', checked: selected.has(item.id) && enabled, disabled: !enabled, 'aria-label': `Import ${row.date || 'invalid date'} ${row.merchant || 'row'} ${position}` });
-      cb.addEventListener('change', () => { cb.checked ? selected.add(item.id) : selected.delete(item.id); updateSave(); });
+      cb.addEventListener('change', () => { cb.checked ? selected.add(item.id) : selected.delete(item.id); updateSave(); paintCategories(); });
       const entry = el('div', { class: 'bank-preview-row' }, el('div', { class: 'bank-preview-main' }, cb,
         el('span', {}, el('strong', {}, row.merchant || row.bankDescription || 'Unrecognized row'), el('small', {}, `${row.date || 'Invalid date'} · ${row.card || 'Unspecified card'} · ${kinds[row.bankKind || row.kind] || row.kind}`)),
         el('b', { class: 'amt' }, row.error ? '—' : `${money(row)} ${row.currency || ''}`)),
@@ -166,7 +278,13 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       if (enabled && item.status !== 'enrichment' && spending(row)) {
         const category = el('input', { value: row.personalCategory || row.category || 'Uncategorized', maxlength: 80, 'aria-label': `Category for transaction ${position}` });
         const purpose = pick(purposes, purposeOf(row), `Purpose for transaction ${position}`);
-        const change = field => edited.set(item.id, { ...edited.get(item.id), [field]: field === 'personalCategory' ? category.value.trim() || 'Uncategorized' : purpose.value, bankReviewFields: [...new Set([...(edited.get(item.id)?.bankReviewFields || []), field])] });
+        const change = field => {
+          // Undo a group action must not erase a newer row-by-row correction.
+          if (field === 'personalCategory') categoryUndo?.delete(item.id);
+          edited.set(item.id, { ...edited.get(item.id), [field]: field === 'personalCategory' ? category.value.trim() || 'Uncategorized' : purpose.value,
+            ...(personalImport && field === 'personalCategory' ? { categoryProvenance: 'user correction' } : {}), bankReviewFields: [...new Set([...(edited.get(item.id)?.bankReviewFields || []), field])] });
+          if (field === 'personalCategory') paintCategories();
+        };
         category.addEventListener('input', () => change('personalCategory')); purpose.addEventListener('change', () => change('spendingPurpose'));
         rowDetails.append(el('div', { class: 'bank-review-fields' }, field('Category', category), field('Purpose', purpose)));
       }
@@ -180,7 +298,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     updateSave();
   }
   saveButton.addEventListener('click', safe(async () => {
-    if (!valid || busy || !selected.size) return;
+    if (!valid || busy || aiBusy || !selected.size) return;
     busy = true; saveButton.disabled = true; body.inert = true;
     try {
       const latest = await db.all('expenses'); if (!active()) return;
@@ -255,6 +373,7 @@ export async function openBankTransaction(id, { settings, onChange = () => {}, s
     try {
       assertScopeCurrent(); save.disabled = true;
       const updated = { ...row, bankReviewFields: [...new Set([...(row.bankReviewFields || []), 'merchant', 'personalCategory', 'spendingPurpose', 'note'])], merchant: merchant.value.trim(), vendor: merchant.value.trim(), note: note.value.trim(), written: note.value.trim(), ...(spending(row) ? { personalCategory: category.value.trim() || 'Uncategorized', spendingPurpose: purpose.value, business: purpose.value === 'business', code: Number(currentSettings().expenseCodes?.find(c => c.short === category.value.trim())?.code || 90009) } : {}) };
+      if (currentScope().workspace === 'personal' && spending(row) && updated.personalCategory !== (row.personalCategory || 'Uncategorized')) updated.categoryProvenance = 'user correction';
       if (spending(row) && purpose.value !== 'business') { delete updated.workExpenseLink; delete updated.workTripSuggestion; }
       await atomicBatchSave([{ table: 'expenses', record: updated, expectedUpdatedAt: row.updated_at }], { label: 'Classify bank transaction' });
       if (!scopeIsCurrent() || !d.isConnected) return;

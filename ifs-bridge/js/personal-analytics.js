@@ -1,4 +1,4 @@
-// Monthly Personal analysis. The caller supplies records from the active Personal
+// Month or date-range Personal analysis. The caller supplies records from the active Personal
 // database; this module never reads Work data, storage, an account, or the network.
 // Pocket concepts retained: separate purchases/refunds, merchant/category/note,
 // refunds in their recorded month, and full-month CSV independent of list filters.
@@ -17,6 +17,17 @@ export function personalMonthBounds(month) {
   if (year < 1000 || year > 9999) throw Error('Choose a year between 1000 and 9999.');
   const days = new Date(Date.UTC(year, number, 0)).getUTCDate();
   return { month, first: `${month}-01`, last: `${month}-${String(days).padStart(2, '0')}`, days };
+}
+// A range is inclusive and must have both ends; it never silently falls back
+// to a month while the user is halfway through choosing their dates.
+export function personalPeriodBounds({ month, dateFrom = '', dateTo = '' } = {}) {
+  if ((dateFrom ?? '') === '' && (dateTo ?? '') === '') return { ...personalMonthBounds(month), isRange: false };
+  if (!dateFrom || !dateTo) throw Error('Choose both a start date and an end date.');
+  for (const date of [dateFrom, dateTo]) {
+    if (typeof date !== 'string' || !validDate(date) || Number(date.slice(0, 4)) < 1000) throw Error('Choose valid dates between years 1000 and 9999.');
+  }
+  if (dateFrom > dateTo) throw Error('The start date must be on or before the end date.');
+  return { first: dateFrom, last: dateTo, days: Math.round((Date.parse(`${dateTo}T00:00:00Z`) - Date.parse(`${dateFrom}T00:00:00Z`)) / 86400000) + 1, isRange: true };
 }
 export function shiftPersonalMonth(month, offset) {
   personalMonthBounds(month);
@@ -128,6 +139,31 @@ function days(entries, month, today, limit = null) {
   });
 }
 
+function rangeDays(entries, bounds, today) {
+  // Keep a long range usable without dropping purchases or rendering thousands
+  // of bars. Each wider bucket exposes both ends for an exact drill-down.
+  const bucketDays = Math.max(1, Math.ceil(bounds.days / 366)), firstTime = Date.parse(`${bounds.first}T00:00:00Z`);
+  const dateAt = offset => new Date(firstTime + offset * 86400000).toISOString().slice(0, 10);
+  const buckets = Array.from({ length: Math.ceil(bounds.days / bucketDays) }, () => []);
+  for (const entry of entries) {
+    const offset = Math.round((Date.parse(`${entry.date}T00:00:00Z`) - firstTime) / 86400000);
+    buckets[Math.floor(offset / bucketDays)].push(entry);
+  }
+  let cumulativePurchasesMinor = 0, cumulativeRefundsMinor = 0;
+  const daily = buckets.map((chosen, index) => {
+    const offset = index * bucketDays, end = Math.min(bounds.days - 1, offset + bucketDays - 1);
+    const dateFrom = dateAt(offset), dateTo = dateAt(end), summary = totals(chosen, entries[0]?.currency || '');
+    cumulativePurchasesMinor = safeAdd(cumulativePurchasesMinor, summary.purchasesMinor);
+    cumulativeRefundsMinor = safeAdd(cumulativeRefundsMinor, summary.refundsMinor);
+    return { date: dateFrom, dateFrom, dateTo, day: Number(dateFrom.slice(-2)), days: end - offset + 1, isAggregate: bucketDays > 1,
+      label: dateFrom === dateTo ? dateFrom : `${dateFrom} – ${dateTo}`,
+      purchasesMinor: summary.purchasesMinor, refundsMinor: summary.refundsMinor, netMinor: summary.netMinor,
+      cumulativePurchasesMinor, cumulativeRefundsMinor, cumulativeNetMinor: safeAdd(cumulativePurchasesMinor, -cumulativeRefundsMinor),
+      count: chosen.length, entryIds: chosen.map(entry => entry.id), isFuture: dateFrom > today };
+  });
+  return { daily, bucketDays, notice: bucketDays > 1 ? `The chart groups up to ${bucketDays} days per column. Totals include the entire selected range.` : '' };
+}
+
 export function filterPersonalEntries(entries, filters = {}) {
   const { dateFrom = '', dateTo = '', date = '' } = filters;
   for (const value of [dateFrom, dateTo, date]) if (value && !validDate(value)) throw Error('Choose valid dates for the transaction filter.');
@@ -189,8 +225,8 @@ function sameElapsedComparison(entries, { month, today, currency, complete, comp
  * when loaded records may overlap; that does not make those records missing.
  * No bank balance or forecast is calculated.
  */
-export function analyzePersonalMonth(rows, { month, today, currency = '', categories = [], filters = {}, complete = true, comparisonBlockedReason = '' } = {}) {
-  const bounds = personalMonthBounds(month);
+export function analyzePersonalMonth(rows, { month, dateFrom = '', dateTo = '', today, currency = '', categories = [], filters = {}, complete = true, comparisonBlockedReason = '' } = {}) {
+  const bounds = personalPeriodBounds({ month, dateFrom, dateTo });
   if (!validDate(today)) throw Error('Supply today as a valid local calendar date.');
   const normalized = normalizePersonalEntries(rows, { categories });
   const monthEntries = normalized.entries.filter(e => e.date >= bounds.first && e.date <= bounds.last);
@@ -208,24 +244,32 @@ export function analyzePersonalMonth(rows, { month, today, currency = '', catego
   if (!complete) warnings.push('Records are incomplete. Totals describe only the entries that loaded; comparisons are unavailable.');
   if (normalized.issues.length) warnings.push(`${normalized.issues.length} invalid entr${normalized.issues.length === 1 ? 'y was' : 'ies were'} excluded. Correct them before relying on totals or exporting.`);
   const futureCount = entries.filter(e => e.date > today).length;
-  if (futureCount) warnings.push(`${futureCount} entr${futureCount === 1 ? 'y is' : 'ies are'} dated after today. The month total includes them; the elapsed-day comparison does not.`);
-  if (selectedTotals.netMinor < 0) warnings.push('Recorded refunds exceed purchases in this month. Refunds are counted on their recorded date.');
-  const comparison = sameElapsedComparison(normalized.entries, { month, today, currency, complete: validComplete, comparisonBlockedReason: clean(comparisonBlockedReason) });
+  if (futureCount) warnings.push(`${futureCount} entr${futureCount === 1 ? 'y is' : 'ies are'} dated after today. ${bounds.isRange ? 'The total for the selected range includes them.' : 'The month total includes them; the elapsed-day comparison does not.'}`);
+  if (selectedTotals.netMinor < 0) warnings.push(`Recorded refunds exceed purchases in this ${bounds.isRange ? 'range' : 'month'}. Refunds are counted on their recorded date.`);
+  const comparison = bounds.isRange ? { available: false, reason: 'Monthly comparisons are unavailable for a custom date range.', previousMonth: null,
+    days: 0, elapsedDays: 0, isCurrentMonth: false, isFutureMonth: bounds.first > today,
+    currentStart: bounds.first, currentEnd: bounds.last, previousStart: null, previousEnd: null,
+    current: selectedTotals, previous: totals([], currency), netDeltaMinor: null, purchasesDeltaMinor: null, refundsDeltaMinor: null,
+    netDeltaPercent: null, purchasesDeltaPercent: null, currentDaily: [], previousDaily: [], label: 'Custom date range',
+    caveat: 'Choose a calendar month for a comparison with the previous month.' }
+    : sameElapsedComparison(normalized.entries, { month, today, currency, complete: validComplete, comparisonBlockedReason: clean(comparisonBlockedReason) });
+  const chart = bounds.isRange ? rangeDays(entries, bounds, today) : { daily: days(entries, month, today), bucketDays: 1, notice: '' };
   const dates = entries.map(e => e.date).sort();
-  return { month, currency, monthStart: bounds.first, monthEnd: bounds.last, daysInMonth: bounds.days,
+  return { month, currency, period: bounds, isRange: bounds.isRange, dateFrom: bounds.isRange ? bounds.first : '', dateTo: bounds.isRange ? bounds.last : '',
+    monthStart: bounds.first, monthEnd: bounds.last, daysInMonth: bounds.days,
     entries, filteredEntries, selectedTotals, filteredTotals, currencyTotals, currencies, categories: categoryGroups, merchants: merchantGroups,
-    daily: days(entries, month, today), comparison,
-    coverage: { complete: validComplete, inputCount: normalized.inputCount, excludedCount: normalized.excludedCount, invalidCount: normalized.issues.length, issues: normalized.issues, monthEntryCount: monthEntries.length, selectedCurrencyCount: entries.length, futureCount, firstRecordedDate: dates[0] || null, lastRecordedDate: dates.at(-1) || null, recordedDays: selectedTotals.daysRecorded, missingDaysAreUnknown: true },
+    daily: chart.daily, dailyGrouping: { bucketDays: chart.bucketDays, notice: chart.notice }, comparison,
+    coverage: { complete: validComplete, inputCount: normalized.inputCount, excludedCount: normalized.excludedCount, invalidCount: normalized.issues.length, issues: normalized.issues, monthEntryCount: monthEntries.length, periodEntryCount: monthEntries.length, selectedCurrencyCount: entries.length, futureCount, firstRecordedDate: dates[0] || null, lastRecordedDate: dates.at(-1) || null, recordedDays: selectedTotals.daysRecorded, missingDaysAreUnknown: true },
     warnings };
 }
 
 // Compatible with Pocket's actual exported header/type conventions. This export
 // always includes the whole selected month and every currency, regardless of the
 // visible category/search/day/kind filters. Formula-looking text is neutralized.
-export function exportPersonalMonthCsv(rows, { month, categories = [] } = {}) {
-  const bounds = personalMonthBounds(month), normalized = normalizePersonalEntries(rows, { categories });
+export function exportPersonalMonthCsv(rows, { month, dateFrom = '', dateTo = '', categories = [] } = {}) {
+  const bounds = personalPeriodBounds({ month, dateFrom, dateTo }), normalized = normalizePersonalEntries(rows, { categories });
   const invalid = normalized.issues.filter(issue => !validDate(issue.date) || issue.date >= bounds.first && issue.date <= bounds.last);
-  if (invalid.length) throw Error(`Cannot export this month until ${invalid.length} invalid entr${invalid.length === 1 ? 'y is' : 'ies are'} corrected.`);
+  if (invalid.length) throw Error(`Cannot export this ${bounds.isRange ? 'range' : 'month'} until ${invalid.length} invalid entr${invalid.length === 1 ? 'y is' : 'ies are'} corrected.`);
   const entries = normalized.entries.filter(e => e.date >= bounds.first && e.date <= bounds.last).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   const escape = value => { let text = String(value ?? ''); if (/^[\s\uFEFF]*[=+@-]/.test(text)) text = "'" + text; return `"${text.replace(/"/g, '""')}"`; };
   const output = [['Date', 'Type', 'Amount', 'Currency', 'Category', 'Merchant', 'Note'], ...entries.map(e => [e.date, e.kind === 'refund' ? 'refund' : 'expense', (e.amountMinor / 100).toFixed(2), e.currency, e.category, e.merchant, e.note])];

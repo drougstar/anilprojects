@@ -15,6 +15,13 @@ body[data-workspace="personal"] #tab-overview,body[data-workspace="personal"] #t
 .personal-month input{width:180px;font-weight:600}
 .personal-month button{padding:4px 10px;font-size:21px;min-width:34px}
 .personal-toolbar-main>select{width:auto;min-width:78px}
+.personal-period{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.personal-period>select{width:auto;min-width:108px}
+.personal-range-field{display:flex;align-items:center;gap:5px;font-size:12px;min-width:0}
+.personal-range-field input{width:145px;max-width:100%;min-width:0}
+.personal-range-message{flex-basis:100%;font-size:12px;color:var(--ink-3)}
+.personal-range-message:empty{display:none}
+@media(max-width:600px){.personal-period{width:100%}.personal-range-field{flex:1 1 140px}.personal-range-field input{flex:1;width:125px}.personal-period>.personal-month{flex:1}.personal-period>.personal-month input{flex:1;width:130px}}
 .personal-toolbar-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
 .personal-status{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink-3);margin-top:8px;align-items:center}
 .personal-status button{font-size:12px}
