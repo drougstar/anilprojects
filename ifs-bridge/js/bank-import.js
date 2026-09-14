@@ -296,7 +296,7 @@ export function planBankImport(parsedFiles, existingExpenseRows = [], options = 
     } catch { /* Unrelated invalid legacy rows cannot establish a duplicate. */ }
   }
   for (const group of existingStrong.values()) group.sort((a, b) => (a.bankOccurrence || 0) - (b.bankOccurrence || 0) || String(a.id).localeCompare(String(b.id)));
-  const output = [], importedStrong = new Map(), importedWeak = new Map(), postedCounts = new Map(), enrichedIds = new Set();
+  const output = [], importedStrong = new Map(), importedWeak = new Map(), postedCounts = new Map(), enrichedIds = new Set(), resetIds = new Set();
   // Prefer the curated workbook when several uploads overlap. Its friendly
   // names/notes survive, while file identity never enters transaction IDs.
   const priority = type => type === 'spending-workbook' ? 0 : type === 'garanti-statement' ? 1 : 2;
@@ -325,7 +325,18 @@ export function planBankImport(parsedFiles, existingExpenseRows = [], options = 
       const stored = byId.get(id) || (pending ? existingPending : existingStrong).get(fp)?.[occurrence - 1], prior = importedStrong.get(transactionKey);
       if (stored) {
         item.status = 'duplicate'; item.matchingExistingId = stored.id; item.reason = stored.deleted ? 'Previously imported and deleted; reimport will not restore it.' : 'Already imported.';
-        const enrichment = bankEnrichment(stored, row);
+        // A deliberate Personal reset permits a fresh import of these exact IDs.
+        // Ordinary deleted purchases still stay deleted. Use only the file's
+        // fields, not old classifications or links, and check the reset version.
+        const reset = options.restorePersonalReset === true && stored.deleted === true && stored.personalResetForReimport === true &&
+          typeof stored.updated_at === 'string' && Number.isFinite(Date.parse(stored.updated_at));
+        if (reset && !resetIds.has(stored.id)) {
+          resetIds.add(stored.id);
+          item.status = 'new'; item.id = stored.id; item.row.id = stored.id; item.row.importKey = `bank:${stored.id}`;
+          item.personalResetReimport = true; item.expectedUpdatedAt = stored.updated_at;
+          item.reason = 'Ready to import again after your Personal reset.';
+        }
+        const enrichment = reset ? null : bankEnrichment(stored, row);
         if (enrichment && !enrichedIds.has(stored.id)) {
           enrichedIds.add(stored.id);
           item.status = 'enrichment'; item.id = stored.id; item.row.id = stored.id;

@@ -1,5 +1,5 @@
 import { db, atomicBatchSave, uuid } from './db.js';
-import { assertScopeCurrent, scopeIsCurrent } from './scope.js';
+import { assertScopeCurrent, scopeIsCurrent, currentScope } from './scope.js';
 import { el, field, openDialog, toast, confirmButton } from './dom.js';
 import { parseBankWorkbook, planBankImport, deriveBankCardAliases } from './bank-import.js';
 import { readBankFiles } from './bank-files.js';
@@ -119,7 +119,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     if (!workbooks.length) throw Error('Choose your Excel exports first.');
     existing = await db.all('expenses'); if (!active()) return;
     parsed = workbooks.map(book => parseBankWorkbook(book, { cardAliases: aliases }));
-    plan = planBankImport(parsed, existing, { cardAliases: aliases, keepReferenceRows: keepReferences.checked });
+    plan = planBankImport(parsed, existing, { cardAliases: aliases, keepReferenceRows: keepReferences.checked, restorePersonalReset: currentScope().workspace === 'personal' });
     // Preserve deliberate draft edits on rows that remain in the new preview.
     edited = new Map([...edited].filter(([id]) => plan.some(item => item.id === id && ready(item))));
     selected = new Set(plan.filter(item => item.status === 'new').map(item => item.id));
@@ -184,11 +184,11 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     busy = true; saveButton.disabled = true; body.inert = true;
     try {
       const latest = await db.all('expenses'); if (!active()) return;
-      const fresh = planBankImport(parsed, latest, { cardAliases: aliases, keepReferenceRows: keepReferences.checked });
+      const fresh = planBankImport(parsed, latest, { cardAliases: aliases, keepReferenceRows: keepReferences.checked, restorePersonalReset: currentScope().workspace === 'personal' });
       const chosen = plan.filter(item => ready(item) && selected.has(item.id));
       for (const item of chosen) {
         const now = fresh.find(candidate => candidate.id === item.id && ready(candidate));
-        if (!now || now.status !== item.status || now.matchingExistingId !== item.matchingExistingId || (item.status === 'enrichment' && (now.expectedUpdatedAt !== item.expectedUpdatedAt || JSON.stringify(now.enrichmentPatch) !== JSON.stringify(item.enrichmentPatch)))) { invalidate(); throw Error('Records changed since the preview. Build it again before importing.'); }
+        if (!now || now.status !== item.status || now.matchingExistingId !== item.matchingExistingId || now.personalResetReimport !== item.personalResetReimport || now.expectedUpdatedAt !== item.expectedUpdatedAt || (item.status === 'enrichment' && JSON.stringify(now.enrichmentPatch) !== JSON.stringify(item.enrichmentPatch))) { invalidate(); throw Error('Records changed since the preview. Build it again before importing.'); }
       }
       const batchId = uuid(), at = new Date().toISOString();
       const items = chosen.map(item => {
@@ -196,7 +196,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
           const prior = latest.find(row => row.id === item.matchingExistingId);
           return { table: 'expenses', record: { ...prior, ...item.enrichmentPatch, bankCardAliases: { ...prior.bankCardAliases, ...item.row.bankCardAliases } }, expectedUpdatedAt: item.expectedUpdatedAt };
         }
-        return { table: 'expenses', record: bankExpenseRecord({ ...item, row: currentRow(item) }, { sheet, settings: currentSettings(), batchId, at }), expectedUpdatedAt: null };
+        return { table: 'expenses', record: bankExpenseRecord({ ...item, row: currentRow(item) }, { sheet, settings: currentSettings(), batchId, at }), expectedUpdatedAt: item.personalResetReimport ? item.expectedUpdatedAt : null };
       });
       // A posted charge and removal of its earlier pending snapshot are one Undo.
       const pendingIds = new Set(chosen.flatMap(item => item.matchingPendingIds || []));

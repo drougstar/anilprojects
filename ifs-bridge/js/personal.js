@@ -2,7 +2,8 @@
 import { live, db } from './db.js';
 import { currentScope, scopeIsCurrent } from './scope.js';
 import { el, download, toast, openDialog } from './dom.js';
-import { preparePersonalExpenses, openNewExpense, openExpense, supabaseClient, scheduleSync } from './expenses.js';
+import { preparePersonalExpenses, openNewExpense, openExpense, supabaseClient, scheduleSync, backupJson } from './expenses.js';
+import { openPersonalReset } from './personal-reset.js';
 import { openExpenseTools, openInbox, openBudgets } from './expense-tools.js';
 import { openActivity } from './workspace-ui.js';
 import { analyzePersonalMonth, exportPersonalMonthCsv } from './personal-analytics.js';
@@ -105,15 +106,14 @@ function includedRows() {
   return records.filter(row => !(state.excludeCompany && row.ledgerWork) && !(state.excludeTrips && row.ledgerTrip));
 }
 function loadWorkSnapshot() {
-  workSnapshot ||= Promise.resolve().then(() => readOnlyWorkContext()).catch(() => ({
-    expenses: [], sheets: [], trips: [], source: 'unavailable',
-    notice: 'Work could not be loaded. Your Personal records are still shown; the combined total is incomplete. Use Refresh all spending to try again.',
-  }));
+  // Personal is rebuilt from its own imports. Work stays available in Work;
+  // do not append its expenses or run automatic cross-workspace matching.
+  workSnapshot ||= Promise.resolve({ expenses: [], sheets: [], trips: [], source: 'personal' });
   return workSnapshot;
 }
 function analysis() {
   const rows = includedRows();
-  const complete = workCoverage?.source === 'cloud' && !workCoverage.notice;
+  const complete = ['cloud', 'personal'].includes(workCoverage?.source) && !workCoverage.notice;
   // Possible overlap is different from a failed load. Keep totals provisional
   // without incorrectly telling the user that their records are missing.
   const comparisonBlockedReason = ledger.possibleDuplicates?.length ? 'Comparisons are paused while possible duplicate spending remains unresolved.' : '';
@@ -160,11 +160,6 @@ async function importBank() {
   const sheet = await preparation;
   if (!isCurrent()) return;
   return openBankImport({ settings, sheet,
-    matchWork: request => {
-      const importIsCurrent = () => isCurrent() && (typeof request.isCurrent !== 'function' || request.isCurrent());
-      if (!importIsCurrent()) throw Error('This bank import is no longer active. Open bank import again.');
-      return matchImportedWorkPurchases({ ...request, isCurrent: importIsCurrent });
-    },
     onChange: change => {
       if (!isCurrent()) return;
       if (change?.matchMessage) matchStatus = { state: change.matched ? 'matched' : 'complete', message: change.matchMessage, matched: change.matched || 0 };
@@ -268,7 +263,11 @@ export async function renderPersonal(root, nextView = 'overview') {
       const loaded = await dataSnapshot;
       if (!loaded || ticket !== requestId || session !== personalSession || !scopeIsCurrent()) return;
       workCoverage = loaded[4];
-      try { ledger = combineSpendingRows(loaded[0], workCoverage); }
+      try { ledger = combineSpendingRows(loaded[0].map(row => {
+        // Leave saved links untouched, but a separate Work record is not an
+        // additional Personal purchase or a missing Personal record.
+        const { workExpenseLink, ...personalRow } = row; return personalRow;
+      }), workCoverage); }
       catch {
         // Invalid Work data must not take the usable Personal ledger away.
         ledger = combineSpendingRows(loaded[0], { expenses: [], trips: [], sheets: [] });
@@ -285,7 +284,7 @@ export async function renderPersonal(root, nextView = 'overview') {
     root.replaceChildren(toolbar(model), spendingScope(), sharedFilters(model));
     if (importReceipt) root.append(importSummaryPanel());
     const coverageWarnings = [...(ledger.warnings || [])];
-    if (workCoverage?.source !== 'cloud') coverageWarnings.unshift(workCoverage?.notice || 'Work is available only from this device. The combined view may be incomplete.');
+    if (!['cloud', 'personal'].includes(workCoverage?.source)) coverageWarnings.unshift(workCoverage?.notice || 'Personal records could not be fully loaded.');
     else if (workCoverage.notice) coverageWarnings.unshift(workCoverage.notice);
     if (coverageWarnings.length) root.append(el('div', { class: 'personal-warning', role: 'status', 'data-spending-coverage': '' }, ...[...new Set(coverageWarnings)].map(text => el('p', {}, text))));
     if (model.warnings?.length) root.append(el('div', { class: 'personal-warning', role: 'alert' }, ...model.warnings.map(text => el('p', {}, text))));
@@ -295,7 +294,7 @@ export async function renderPersonal(root, nextView = 'overview') {
       onOpenEntry: entry => act(() => editEntry(entry))(), onOpenBudgets: act(openBudgets) }));
     else if (view === 'transactions') root.append(transactionPanel(model));
     else root.append(...overview(model));
-    root.append(el('p', { class: 'personal-footnote' }, 'Personal and Work records are shown together. Clear matches count once. Currencies stay separate. Refunds reduce spending in the month received.'));
+    root.append(el('p', { class: 'personal-footnote' }, 'Only transactions imported or added in Personal are counted here. Currencies stay separate. Refunds reduce spending in the month received.'));
     paintedSession = personalSession;
     if (focusLabel) {
       const target = [...root.querySelectorAll('[aria-label]')].find(node => node.getAttribute('aria-label') === focusLabel);
@@ -355,6 +354,7 @@ function toolbar(model) {
     item('Refresh all spending', () => refreshPersonal()),
     item('Export month · all currencies', exportMonth, { disabled: !model.currencyTotals.some(entry => entry.count) }),
     item('History', openActivity), item('Other tools', openExpenseTools),
+    item('Reset Personal transactions', () => openPersonalReset({ client: supabaseClient, backup: backupJson, onReset: refreshPersonal })),
     item('This month', () => setMonth(today().slice(0, 7)), { disabled: state.month === today().slice(0, 7) }),
     el('span', { id: 'exp-sync', class: 'personal-connection', role: 'status', 'aria-live': 'polite' }, syncText)));
   more.addEventListener('keydown', event => { if (event.key === 'Escape') { more.open = false; more.querySelector('summary').focus(); } });
