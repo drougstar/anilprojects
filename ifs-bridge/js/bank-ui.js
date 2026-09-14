@@ -6,6 +6,7 @@ import { readBankFiles } from './bank-files.js';
 import { suggestImportCategories } from './import-categories.js';
 import { requestImportCategorySuggestions } from './import-ai.js';
 import { buildBankPeriodDrafts, mergeBankPeriods } from './bank-periods.js';
+import { resolvePersonalCategory, personalCategoryChoices } from './personal-categories.js';
 
 const purposes = [['review', 'Needs review'], ['personal', 'Personal'], ['business', 'Business']];
 const kinds = { purchase: 'Purchase', refund: 'Refund', fee: 'Bank charge', payment: 'Card repayment', transfer: 'FX / balance transfer', financing: 'Statement financing', pending: 'Pending authorization', reward: 'Reward points', unknown: 'Unrecognized' };
@@ -17,7 +18,7 @@ const ready = item => ['new', 'possible-match', 'enrichment'].includes(item.stat
 
 export function bankExpenseRecord(item, { sheet, settings, batchId, at }) {
   const row = item.row, bankKind = row.bankKind || row.kind;
-  const category = row.personalCategory || row.category || 'Uncategorized';
+  const category = currentScope().workspace === 'personal' ? resolvePersonalCategory(row, settings) : row.personalCategory || row.category || 'Uncategorized';
   const purpose = purposeOf(row);
   const record = { ...row, id: item.id, sheetId: sheet.id, bankTransaction: true,
     kind: spending(row) ? (row.amount < 0 ? 'refund' : 'purchase') : 'purchase', bankKind,
@@ -253,11 +254,11 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     const needle = categorySearch.value.trim().toLocaleLowerCase();
     const groups = categoryGroups.filter(group => (categoryView.value === 'all' || group.category) && (!needle || group.merchant.toLocaleLowerCase().includes(needle) || plan.some(item => group.itemIds.includes(item.id) && [item.row?.merchant, item.row?.bankDescription].some(value => String(value || '').toLocaleLowerCase().includes(needle)))));
     const countReady = groups => new Set(groups.flatMap(group => group.itemIds.filter(groupReady))).size;
-    const categories = [...new Set([
-      ...(currentSettings().personalCategories || []), ...(currentSettings().expenseCodes || []).map(item => item.short),
+    const categories = personalCategoryChoices(currentSettings(), [
+      ...(currentSettings().personalCategories || []),
       ...existing.map(row => row.personalCategory), ...categoryGroups.flatMap(group => [group.category, ...(group.currentCategories || [group.currentCategory])]),
-      ...categoryDrafts.values(), ...addedCategories, 'Subscriptions', 'Groceries', 'Food & drink', 'Transport', 'Shopping', 'Health', 'Travel', 'Other'
-    ].filter(value => typeof value === 'string' && value.trim() && value !== 'Mixed categories'))].sort((a, b) => a.localeCompare(b));
+      ...categoryDrafts.values(), ...addedCategories
+    ].filter(value => typeof value === 'string' && value.trim() && value !== 'Mixed categories'));
     const categoryChoices = categories.map(value => [value, value]);
     const bulk = pick([['', 'Choose a category'], ...categoryChoices], bulkCategory, 'Category for matching merchants');
     const bulkApply = el('button', { type: 'button', disabled: !bulkCategory || !countReady(groups), onclick: () => {
@@ -320,7 +321,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       if (!active() || !valid || revision !== previewRevision) return;
       const byId = new Map(suggestions.map(group => [group.id, group]));
       // A draft typed while the request was running remains the user's choice.
-      categoryGroups = categoryGroups.map(group => byId.has(group.id) && !categoryDrafts.has(group.id) ? { ...group, ...byId.get(group.id) } : group);
+      categoryGroups = categoryGroups.map(group => byId.has(group.id) && !categoryDrafts.has(group.id) ? { ...group, ...byId.get(group.id), category: byId.get(group.id).category ? resolvePersonalCategory(byId.get(group.id).category, currentSettings()) : '' } : group);
       for (const group of suggestions) aiReviewed.add(group.id);
       categoryView.value = 'suggested';
       categoryFeedback.textContent = `${suggestions.filter(group => group.category).length} AI category suggestions ready. Review them, then use the ones you want.`;
@@ -340,7 +341,9 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     detailChoice.checked = false;
     valid = true; page = 1; status.classList.remove('error'); status.textContent = '';
     if (personalImport) {
-      categoryGroups = suggestImportCategories(plan.map(item => ({ ...item, row: { ...item.row, ...edited.get(item.id) } })), existing);
+      categoryGroups = suggestImportCategories(plan.map(item => ({ ...item, row: { ...item.row, ...edited.get(item.id) } })), existing,
+        { resolveCategory: value => resolvePersonalCategory(value, currentSettings()) })
+        .map(group => ({ ...group, category: group.category ? resolvePersonalCategory(group.category, currentSettings()) : '' }));
       categoryDrafts = new Map([...categoryDrafts].filter(([id]) => categoryGroups.some(group => group.id === id)));
       categoryUndo = null; categoryFeedback.textContent = '';
       aiReviewed = new Set();
@@ -472,7 +475,9 @@ export async function openBankTransaction(id, { settings, onChange = () => {}, s
   if (!row || row.deleted) throw Error('This transaction is no longer available.');
   const currentSettings = typeof settings === 'function' ? settings : () => settings;
   const merchant = el('input', { value: row.merchant || row.bankDescription || '', maxlength: 200 });
-  const category = el('input', { value: row.personalCategory || 'Uncategorized', maxlength: 80 });
+  const personal = currentScope().workspace === 'personal';
+  const category = personal ? pick(personalCategoryChoices(currentSettings(), [row]).map(value => [value, value]), resolvePersonalCategory(row, currentSettings()), 'Transaction category')
+    : el('input', { value: row.personalCategory || 'Uncategorized', maxlength: 80 });
   const purpose = pick(purposes, purposeOf(row), 'Spending purpose');
   const note = el('textarea', { rows: 3, maxlength: 2000 }, row.note || '');
   const status = el('p', { class: 'help', role: 'status' });
@@ -490,7 +495,7 @@ export async function openBankTransaction(id, { settings, onChange = () => {}, s
     try {
       assertScopeCurrent(); save.disabled = true;
       const updated = { ...row, bankReviewFields: [...new Set([...(row.bankReviewFields || []), 'merchant', 'personalCategory', 'spendingPurpose', 'note'])], merchant: merchant.value.trim(), vendor: merchant.value.trim(), note: note.value.trim(), written: note.value.trim(), ...(spending(row) ? { personalCategory: category.value.trim() || 'Uncategorized', spendingPurpose: purpose.value, business: purpose.value === 'business', code: Number(currentSettings().expenseCodes?.find(c => c.short === category.value.trim())?.code || 90009) } : {}) };
-      if (currentScope().workspace === 'personal' && spending(row) && updated.personalCategory !== (row.personalCategory || 'Uncategorized')) updated.categoryProvenance = 'user correction';
+      if (currentScope().workspace === 'personal' && spending(row) && updated.personalCategory !== resolvePersonalCategory(row, currentSettings())) updated.categoryProvenance = 'user correction';
       if (spending(row) && purpose.value !== 'business') { delete updated.workExpenseLink; delete updated.workTripSuggestion; }
       await atomicBatchSave([{ table: 'expenses', record: updated, expectedUpdatedAt: row.updated_at }], { label: 'Classify bank transaction' });
       if (!scopeIsCurrent() || !d.isConnected) return;

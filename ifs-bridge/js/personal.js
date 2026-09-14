@@ -15,6 +15,8 @@ import { createWorkReconciler, matchImportedWorkPurchases } from './work-reconci
 import { readOnlyWorkContext } from './work-context.js';
 import { combineSpendingRows } from './spending-ledger.js';
 import { bankPeriodView } from './bank-periods.js';
+import { groupBankPeriods, resolveBankPeriodSelection, bankPeriodGroupLabel } from './bank-period-groups.js';
+import { resolvePersonalCategory } from './personal-categories.js';
 
 let ctx, preparation, host, view = 'overview', requestId = 0;
 let personalSession = 0, workReconciler, matching = false, matchStatus = null;
@@ -119,7 +121,7 @@ function includedRows() {
   const members = state.filters.bankPeriod ? new Set(selectedBankPeriod()?.memberIds || []) : null;
   return historyRows().filter(row => !members || members.has(row.id));
 }
-function selectedBankPeriod() { return bankPeriods.find(period => period.id === state.filters.bankPeriod); }
+function selectedBankPeriod() { return bankPeriods.find(period => period.id === resolveBankPeriodSelection(state.filters.bankPeriod, bankPeriods)); }
 function selectedPeriod() {
   if (state.filters.bankPeriod) {
     const period = selectedBankPeriod();
@@ -303,12 +305,17 @@ export async function renderPersonal(root, nextView = 'overview') {
         workCoverage = { source: 'unavailable', notice: 'Work records could not be combined. Your Personal records are shown; the combined total is incomplete. Use Refresh all spending to try again.' };
       }
       records = ledger.rows;
-      bankPeriods = loaded[5].flatMap(sheet => (sheet.bankPeriods || []).map(period => bankPeriodView(period, loaded[0])))
-        .sort((a, b) => `${b.end || b.observedEnd || ''}|${b.id}`.localeCompare(`${a.end || a.observedEnd || ''}|${a.id}`));
+      bankPeriods = groupBankPeriods(loaded[5].flatMap(sheet => (sheet.bankPeriods || []).map(period => bankPeriodView(period, loaded[0]))));
+      // Older saved views selected a single card. Keep the same cycle while
+      // the period selector now includes every card and currency together.
+      if (state.filters.bankPeriod) state.filters.bankPeriod = resolveBankPeriodSelection(state.filters.bankPeriod, bankPeriods) || state.filters.bankPeriod;
       budgets = loaded[3];
       inboxCount = loaded[1].filter(item => !['created', 'matched', 'done', 'imported'].includes(item.status)).length;
       conflictCount = loaded[2].length;
       dataLoaded = true;
+    }
+    if (state.filters.category && !/^\d+$/.test(state.filters.category)) {
+      state.filters.category = resolvePersonalCategory(state.filters.category, ctx.settings()).normalize('NFKC').toLowerCase().replace(/\u0307/g, '');
     }
     const model = analysis();
     state.currency = model.currency;
@@ -446,7 +453,7 @@ function periodControls(month) {
     state.filters.bankPeriod = id || 'unavailable'; rangeDraft = null;
     delete state.filters.dateFrom; delete state.filters.dateTo; delete state.filters.date;
     const period = selectedBankPeriod();
-    if (period?.currency) state.currency = period.currency;
+    if (period?.month) state.month = period.month;
     state.page = 1; changedView(); renderPersonal(host, view);
   };
   const mode = choice('Spending period', [['month', 'Month'], ['range', 'Date range'], ['bank', 'Bank period']], rangeDraft ? 'range' : state.filters.bankPeriod ? 'bank' : custom ? 'range' : 'month', value => {
@@ -462,11 +469,11 @@ function periodControls(month) {
   });
   if (state.filters.bankPeriod && !rangeDraft) {
     const period = selectedBankPeriod();
-    const options = bankPeriods.map(item => [item.id, `${item.card} · ${item.currency} · ${item.end ? `${item.dateBasis === 'estimated' ? 'Estimated ' : ''}${item.end}` : item.observedEnd ? `Through ${item.observedEnd}` : item.sources?.find(source => source.id === item.authoritativeSourceId)?.sourceFile || item.sources?.[0]?.sourceFile || 'Date not set'} · ${item.status === 'closed' ? 'Closed' : 'Ongoing'}`]);
+    const options = bankPeriods.map(item => [item.id, bankPeriodGroupLabel(item)]);
     if (!period) options.unshift([state.filters.bankPeriod, 'No saved period selected']);
     return el('div', { class: 'personal-period personal-bank-period' }, mode, choice('Bank period', options, state.filters.bankPeriod, chooseBankPeriod),
       el('div', { class: 'personal-bank-period-info', role: 'status' }, period
-        ? `${period.status === 'closed' ? 'Closed · statement issued' : 'Ongoing · period still open'}${period.end ? ` · ${period.start ? period.start + ' to ' : 'Closes '}${period.end}` : period.observedEnd ? ` · Transactions through ${period.observedEnd}` : ''}${period.dateBasis === 'estimated' ? ' (estimated from bank activity)' : period.dateBasis === 'schedule' ? ' (from your schedule)' : ''}. ${period.importedSpendingCount} of ${period.expectedSpendingCount} spending rows available.${period.dueDate ? ` Payment due: ${period.dueDate}.` : ''} Totals show spending in this file, not the bank balance due.`
+        ? `${period.status === 'closed' ? 'Closed statement' : 'Ongoing period'} · ${period.cards.length} cards · ${period.importedSpendingCount} purchases and refunds. Use currency and card filters to narrow it.${period.dateBasis === 'estimated' ? ' Dates estimated from bank activity.' : ''}${period.coverageComplete ? '' : ' Some statement rows are unavailable.'}`
         : 'Import your bank files to save their periods. If this period was removed, choose another period or Month.'));
   }
   if (!custom) return el('div', { class: 'personal-period' }, mode,

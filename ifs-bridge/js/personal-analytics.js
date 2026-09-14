@@ -3,6 +3,7 @@
 // Pocket concepts retained: separate purchases/refunds, merchant/category/note,
 // refunds in their recorded month, and full-month CSV independent of list filters.
 import { minorAmount, validDate, isSpendingRecord } from './expense-workflows.js';
+import { personalCategoryKey } from './personal-categories.js';
 
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
 const clean = value => String(value ?? '').trim().replace(/\s+/g, ' ');
@@ -85,7 +86,8 @@ export function normalizePersonalEntries(rows, { categories = [] } = {}) {
       const id = source.id == null || source.id === '' ? `row-${index}` : String(source.id);
       if (ids.has(id)) throw Error('Duplicate entry identifier; refresh the loaded records.');
       ids.add(id);
-      const category = clean(source.personalCategory || source.category) || labels.get(String(source.code)) || 'Uncategorized';
+      const rawCategory = clean(source.personalCategory || source.category) || labels.get(String(source.code)) || 'Uncategorized';
+      const category = categories.find(item => item && typeof item === 'object' && [item.short, ...(item.aliases || [])].some(alias => personalCategoryKey(alias) === personalCategoryKey(rawCategory)))?.short || rawCategory;
       const merchant = clean(source.merchant || source.vendor || '');
       const note = String(source.note ?? source.written ?? '').trim();
       const description = String(source.written ?? source.description ?? '').trim();

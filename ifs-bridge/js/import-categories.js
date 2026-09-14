@@ -103,8 +103,13 @@ function monthlyEvidence(rows, incoming) {
  * needed. itemIds refer only to incoming new/possible-match rows. Workbook and
  * manual categories, duplicate/enrichment rows, and reference movements are kept.
  */
-export function suggestImportCategories(plan, existingRows = []) {
+export function suggestImportCategories(plan, existingRows = [], { resolveCategory = value => value } = {}) {
   if (!Array.isArray(plan) || !Array.isArray(existingRows)) throw Error('Expected an import plan and saved Personal records.');
+  // Compare merged labels on copies only. A translated bank label is not a
+  // new merchant correction, and the original bank evidence stays untouched.
+  const comparable = row => row && ({ ...row, personalCategory: resolveCategory(categoryOf(row)), bankCategory: row.bankCategory ? resolveCategory(row.bankCategory) : row.bankCategory });
+  existingRows = existingRows.map(comparable);
+  plan = plan.map(item => ({ ...item, row: comparable(item.row) }));
   const groups = new Map(), corrections = new Map(), evidence = new Map();
   const addEvidence = row => {
     if (!row || !own(row) || !identityOf(row)) return;
@@ -140,7 +145,7 @@ export function suggestImportCategories(plan, existingRows = []) {
     if (choices.length > 1) return { ...group, source: 'ambiguous', reason: 'Your previous category corrections disagree for this merchant. Choose the category for these transactions.' };
     if (choices.length === 1 && (choices[0].trusted || choices[0].ids.size >= 2) && purchases.length) {
       const category = choices[0].category;
-      if (norm(category) !== 'subscriptions' || rows.every(row => !installment(row))) return { ...group, category, source: 'user-history', confidence: 'high', reason: `You explicitly used “${category}” for this ${knownService(identity) ? 'service' : 'original merchant'} in ${choices[0].ids.size} saved transaction${choices[0].ids.size === 1 ? '' : 's'}.` };
+      if (norm(category) !== norm(resolveCategory('Subscriptions')) || rows.every(row => !installment(row))) return { ...group, category, source: 'user-history', confidence: 'high', reason: `You explicitly used “${category}” for this ${knownService(identity) ? 'service' : 'original merchant'} in ${choices[0].ids.size} saved transaction${choices[0].ids.size === 1 ? '' : 's'}.` };
     }
     if (!purchases.length) return { ...group, reason: 'Refunds and charges without a posted purchase do not establish a subscription. Choose a category if needed.' };
     if (choices.length) return { ...group, source: 'ambiguous', reason: 'There is only one usable previous category correction, or the transactions include instalments. Confirm a category for this group.' };

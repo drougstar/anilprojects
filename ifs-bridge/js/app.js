@@ -10,6 +10,9 @@ import { timeCodeInfo } from './time-codes.js';
 import { parseCopyObject, buildRecord, joinRecords, ifsDate, ifsNumber } from './ifs.js';
 import { loadSettings, saveSettings, defaultsForScope, hasSavedSettings } from './store.js';
 import { createSettingsPage } from './settings-ui.js';
+import { db, atomicBatchSave } from './db.js';
+import { proposePersonalCategories } from './personal-categories.js';
+import { savePersonalCategories } from './personal-category-save.js';
 import { initExpenses, render as renderExpenses, supabaseClient, scheduleSync, exportCsv, backupJson, restoreJson, openExpenseReview, openExpense } from './expenses.js';
 import { el, $, confirmButton, toast, openDialog, download, field as dlgField } from './dom.js';
 import { initLocalBackup, backupAvailable, pushBackup } from './localbackup.js';
@@ -530,15 +533,27 @@ async function copyExport() {
 }
 
 // ---------- settings ----------
+async function personalCategoryTables() {
+  assertScopeCurrent();
+  if (currentScope().workspace !== 'personal') throw Error('Category merging is available in Personal.');
+  const names = ['expenses', 'budgets', 'templates', 'inbox'];
+  const rows = await Promise.all(names.map(name => db.all(name))); assertScopeCurrent();
+  return Object.fromEntries(names.map((name, index) => [name, rows[index]]));
+}
 function renderSettings(group, focus) {
   if (!scopeIsCurrent() || !settings) return;
   if (!settingsPage) settingsPage = createSettingsPage({
     // Read persisted preferences when merging: another open tab may have saved
     // changes since this tab created its draft.
     workspace: currentScope().workspace, getSaved: loadSettings, isCurrent: scopeIsCurrent,
+    proposeCategories: async value => proposePersonalCategories(value, await personalCategoryTables()),
     onSave: async next => {
       assertScopeCurrent();
-      const result = await accountPreferences.save(next);
+      const result = currentScope().workspace === 'personal' ? await savePersonalCategories(next, {
+        getSaved: loadSettings, readTables: personalCategoryTables, saveBatch: atomicBatchSave,
+        syncRecords: () => sync(supabaseClient()), savePreferences: value => accountPreferences.save(value),
+        guard: assertScopeCurrent, hasConflicts: async () => (await db.all('conflicts')).length > 0
+      }) : await accountPreferences.save(next);
       assertScopeCurrent();
       settings = result.settings;
       ++clockifyConnectId;

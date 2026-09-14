@@ -106,7 +106,7 @@ export function createSettingsPage(options) {
     try {
       const result = await onSave(next);
       if (!current() || session !== savingSession) return;
-      session.committed(next); pending = false; paint(); setMessage(result?.message || 'Saved. Your new setup is now in use.');
+      session.committed(result?.settings || next); pending = false; paint(); setMessage(result?.message || 'Saved. Your new setup is now in use.');
     } catch (error) { if (current() && session === savingSession) { pending = false; changed(); setMessage(`Save failed: ${error.message}. Your draft is still here.`); } }
   }
   function review() {
@@ -174,16 +174,50 @@ export function createSettingsPage(options) {
   }
   function categories() {
     const s = draft(), host = el('div');
+    const removeCategory = index => {
+      if (workspace !== 'personal') { s.expenseCodes.splice(index, 1); changed(); paintRows(); return; }
+      const removed = s.expenseCodes[index], remaining = s.expenseCodes.filter((_, i) => i !== index);
+      if (!remaining.length) { setMessage('Keep at least one category.'); return; }
+      const target = el('select', { 'aria-label': 'Move transactions to' }, remaining.map(item => el('option', { value: String(item.code) }, item.short)));
+      const body = el('div', { class: 'form' }, el('p', {}, `Move every transaction using “${removed.short}” to the category you keep. Save settings to apply this together.`), field('Keep category', target));
+      const dialog = openDialog('Merge category', body);
+      body.append(button('Use this category', () => {
+        if (!current() || s !== draft() || s.expenseCodes[index] !== removed) { dialog.close(); return; }
+        const kept = remaining.find(item => String(item.code) === target.value);
+        kept.aliases = [...new Set([...(kept.aliases || []), removed.short, ...(removed.aliases || [])])].filter(name => name && name !== kept.short);
+        s.expenseCodes.splice(index, 1); dialog.close(); changed(); paintRows();
+      }, { class: 'primary' }));
+    };
+    const cleanUp = async () => {
+      if (!current() || pending || !options.proposeCategories) return;
+      pending = true; changed();
+      let failure = '';
+      try {
+        const snapshot = JSON.stringify(s), proposal = await options.proposeCategories(jsonClone(s));
+        if (!current() || s !== draft() || snapshot !== JSON.stringify(s)) return;
+        const body = el('div', { class: 'form' }, el('p', {}, 'Keep your transaction category names and combine matching names. All transaction amounts, dates and notes stay the same.'),
+          ...proposal.merges.map(item => el('p', {}, `${item.from} → ${item.to}${item.count ? ` · ${item.count} transactions` : ''}`)));
+        if (!proposal.merges.length) body.append(el('p', {}, 'No duplicate names found. Categories used on transactions will be added to Settings.'));
+        const dialog = openDialog('Merge duplicate categories', body);
+        body.append(button('Use these categories', () => {
+          if (!current() || s !== draft() || snapshot !== JSON.stringify(s)) { dialog.close(); return; }
+          s.expenseCodes = jsonClone(proposal.settings.expenseCodes); dialog.close(); paint(); changed();
+          setMessage('Ready. Save settings to move transactions first, then remove the duplicate names.');
+        }, { class: 'primary' }), button('Cancel', () => dialog.close()));
+      } catch (error) { failure = error.message; }
+      finally { if (current()) { pending = false; changed(); if (failure) setMessage(failure); } }
+    };
     const paintRows = () => {
       host.replaceChildren(...s.expenseCodes.map((item, index) => el('div', { class: 'settings-category-row' },
         field('Name', input(item, 'short', `Category name ${index + 1}`)),
         workspace === 'work' ? field('IFS code', input(item, 'code', `Category code ${index + 1}`, { inputmode: 'numeric' })) : '',
         workspace === 'work' ? advanced('IFS description', field('Description', input(item, 'desc', `Category description ${index + 1}`))) : '',
-        button('Remove', () => { s.expenseCodes.splice(index, 1); changed(); paintRows(); }, { class: 'link' }))));
+        button(workspace === 'personal' ? 'Merge into…' : 'Remove', () => removeCategory(index), { class: 'link' }))));
       if (workspace === 'personal') host.querySelectorAll('input').forEach((node, index) => node.addEventListener('input', () => { s.expenseCodes[index].desc = node.value.trim(); changed(); }));
       host.append(button('Add category', () => { const code = Math.max(workspace === 'personal' ? 90000 : 0, ...s.expenseCodes.map(item => Number(item.code) || 0)) + 1; s.expenseCodes.push({ code, short: '', desc: '' }); changed(); paintRows(); }));
     };
-    paintRows(); return card('Expense categories', el('p', { class: 'help' }, workspace === 'work' ? 'Use the expense codes accepted by IFS. Changing this list does not rewrite old expenses.' : 'Organize future spending entries. Removing a category does not delete its old transactions.'), host);
+    paintRows(); return card('Expense categories', el('p', { class: 'help' }, workspace === 'work' ? 'Use the expense codes accepted by IFS. Changing this list does not rewrite old expenses.' : 'One set of categories for your transactions and future imports. Renaming or merging updates existing transactions when you Save.'),
+      workspace === 'personal' && options.proposeCategories ? button('Merge duplicate categories', cleanUp) : '', host);
   }
   function perDiem() {
     const s = draft(), host = el('div');

@@ -82,6 +82,9 @@ const workShape = {
   mapping: array(mapping), clockify: object({ apiKey: string(4096) }, ['apiKey']),
 };
 const personalShape = Object.fromEntries(['settingsListsVersion', 'theme', 'timeZone', 'defaultCurrency', 'currencies', 'expenseCodes'].map(key => [key, workShape[key]]));
+// Retired category names travel with the retained category across devices.
+// Work / IFS codes keep their existing schema.
+personalShape.expenseCodes = array(object({ code, desc: string(), short: string(), aliases: array(string(80), 100) }, ['code', 'desc', 'short']), 1000, 1);
 const workspaceOf = workspace => enumeration(['work', 'personal'])(workspace, 'workspace');
 const shapeOf = workspace => workspace === 'personal' ? personalShape : workShape;
 
