@@ -92,11 +92,12 @@ function resetFilters() {
 }
 export function refreshPersonal(change) {
   if (!scopeIsCurrent() || currentScope().workspace !== 'personal') return;
-  // Refreshes reload Work once; changing a view or filter reuses the same snapshot.
+  // Editing an existing transaction refreshes its data, not the user's view.
+  // Only a newly added entry should reveal a different month/currency.
+  const existingEntry = change?.entry?.id && records.some(row => row.id === change.entry.id);
   workSnapshot = null;
   dataSnapshot = null; dataLoaded = false;
-  // Keep a saved purchase visible when its date/currency moves outside this view.
-  if (change?.entry && validMonth(String(change.entry.date || '').slice(0, 7)) && /^[A-Z]{3}$/.test(change.entry.currency || '')) {
+  if (!existingEntry && change?.entry && validMonth(String(change.entry.date || '').slice(0, 7)) && /^[A-Z]{3}$/.test(change.entry.currency || '')) {
     state.month = change.entry.date.slice(0, 7); state.currency = change.entry.currency;
     state.filters = {}; state.page = 1;
   }
@@ -237,6 +238,7 @@ function exportMonth() {
 
 export async function renderPersonal(root, nextView = 'overview') {
   if (currentScope().workspace !== 'personal' || !scopeIsCurrent()) return;
+  const sameView = host === root && view === nextView && paintedSession === personalSession;
   if (host && host !== root) host.replaceChildren();
   host = root; view = ['overview', 'transactions', 'study'].includes(nextView) ? nextView : 'overview';
   const ticket = ++requestId;
@@ -281,6 +283,9 @@ export async function renderPersonal(root, nextView = 'overview') {
     }
     const model = analysis();
     state.currency = model.currency;
+    // Capture just before replacing the DOM: a slow read must not undo scrolling
+    // or folding the user did while it was loading. No private data is persisted.
+    const presentation = sameView ? capturePresentation(root) : null;
     root.replaceChildren(toolbar(model), spendingScope(), sharedFilters(model));
     if (importReceipt) root.append(importSummaryPanel());
     const coverageWarnings = [...(ledger.warnings || [])];
@@ -296,7 +301,8 @@ export async function renderPersonal(root, nextView = 'overview') {
     else root.append(...overview(model));
     root.append(el('p', { class: 'personal-footnote' }, 'Only transactions imported or added in Personal are counted here. Currencies stay separate. Refunds reduce spending in the month received.'));
     paintedSession = personalSession;
-    if (focusLabel) {
+    if (presentation) restorePresentation(root, presentation);
+    else if (focusLabel) {
       const target = [...root.querySelectorAll('[aria-label]')].find(node => node.getAttribute('aria-label') === focusLabel);
       target?.focus({ preventScroll: true });
       if (selection && target?.type === 'search') target.setSelectionRange(...selection);
@@ -305,6 +311,43 @@ export async function renderPersonal(root, nextView = 'overview') {
     if (ticket !== requestId || !scopeIsCurrent()) return;
     root.replaceChildren(el('div', { class: 'empty', role: 'alert' }, el('h3', {}, 'Spending could not be loaded'), el('p', {}, error.message), button('Try again', () => renderPersonal(root, nextView))));
   } finally { if (ticket === requestId) root.removeAttribute('aria-busy'); }
+}
+
+function capturePresentation(root) {
+  const active = root.contains(document.activeElement) ? document.activeElement : null;
+  const rows = [...root.querySelectorAll('[data-personal-entry-id]')];
+  const row = active?.closest('[data-personal-entry-id]');
+  const ancestors = [];
+  for (let node = root; node; node = node.parentElement) {
+    if (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth) {
+      ancestors.push({ node, top: node.scrollTop, left: node.scrollLeft });
+    }
+  }
+  return {
+    x: window.scrollX, y: window.scrollY, ancestors,
+    folds: ['.personal-filter-panel', '.personal-more'].map(selector => ({ selector, open: root.querySelector(selector)?.open })),
+    rowId: row?.dataset.personalEntryId, rowIndex: rows.indexOf(row),
+    focusLabel: active?.getAttribute('aria-label'),
+    selection: active?.tagName === 'INPUT' && active.type === 'search' ? [active.selectionStart, active.selectionEnd] : null,
+    horizontal: [...root.querySelectorAll('.personal-chart-scroll')].map(node => node.scrollLeft),
+  };
+}
+function restorePresentation(root, saved) {
+  for (const { selector, open } of saved.folds) {
+    const node = root.querySelector(selector);
+    if (node && typeof open === 'boolean') node.open = open;
+  }
+  const rows = [...root.querySelectorAll('[data-personal-entry-id]')];
+  // Merchant, date and amount can change the accessible label. The record ID
+  // still identifies the same row; if it leaves the filter, use its next neighbour.
+  const focus = saved.rowId
+    ? rows.find(node => node.dataset.personalEntryId === saved.rowId) || rows[Math.min(saved.rowIndex, rows.length - 1)]
+    : saved.focusLabel && [...root.querySelectorAll('[aria-label]')].find(node => node.getAttribute('aria-label') === saved.focusLabel);
+  focus?.focus({ preventScroll: true });
+  if (saved.selection && focus?.type === 'search') focus.setSelectionRange(...saved.selection);
+  [...root.querySelectorAll('.personal-chart-scroll')].forEach((node, index) => { node.scrollLeft = saved.horizontal[index] || 0; });
+  for (const { node, top, left } of saved.ancestors) { node.scrollTop = top; node.scrollLeft = left; }
+  window.scrollTo({ left: saved.x, top: saved.y, behavior: 'instant' });
 }
 
 function spendingScope() {
@@ -458,7 +501,7 @@ function breakdown(title, groups, field) {
     el('small', {}, 'Amounts after refunds; bars show share of purchases.'), body);
 }
 function entryRow(entry) {
-  const row = button('', act(() => editEntry(entry)), { class: 'personal-entry', 'aria-label': `${entry.source?.ledgerReadOnly ? 'View' : 'Edit'} ${entry.merchant || entry.category}, ${dateLabel(entry.date)}, ${cash(entry.signedMinor, entry.currency)}` });
+  const row = button('', act(() => editEntry(entry)), { class: 'personal-entry', 'data-personal-entry-id': entry.id, 'aria-label': `${entry.source?.ledgerReadOnly ? 'View' : 'Edit'} ${entry.merchant || entry.category}, ${dateLabel(entry.date)}, ${cash(entry.signedMinor, entry.currency)}` });
   const link = entry.source?.workExpenseLink;
   const effectivePurpose = effectiveSpendingPurpose(entry.source || entry);
   const purpose = effectivePurpose === 'business' && (entry.source?.ledgerMatch || link?.method === 'automatic' && link.workspace === 'work' && link.expenseId)
