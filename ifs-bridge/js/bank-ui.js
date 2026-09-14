@@ -5,6 +5,7 @@ import { parseBankWorkbook, planBankImport, deriveBankCardAliases } from './bank
 import { readBankFiles } from './bank-files.js';
 import { suggestImportCategories } from './import-categories.js';
 import { requestImportCategorySuggestions } from './import-ai.js';
+import { buildBankPeriodDrafts, mergeBankPeriods } from './bank-periods.js';
 
 const purposes = [['review', 'Needs review'], ['personal', 'Personal'], ['business', 'Business']];
 const kinds = { purchase: 'Purchase', refund: 'Refund', fee: 'Bank charge', payment: 'Card repayment', transfer: 'FX / balance transfer', financing: 'Statement financing', pending: 'Pending authorization', reward: 'Reward points', unknown: 'Unrecognized' };
@@ -32,7 +33,7 @@ export function bankExpenseRecord(item, { sheet, settings, batchId, at }) {
   return record;
 }
 
-export async function openBankImport({ settings, sheet, onChange = () => {}, sync = () => {}, readFiles = readBankFiles, matchWork, aiClient = null }) {
+export async function openBankImport({ settings, sheet, onChange = () => {}, sync = () => {}, readFiles = readBankFiles, matchWork, aiClient = null, bankPeriodsEnabled = false }) {
   assertScopeCurrent();
   const currentSettings = typeof settings === 'function' ? settings : () => settings;
   const aborter = new AbortController();
@@ -40,6 +41,18 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   let categoryGroups = [], categoryDrafts = new Map(), categoryUndo = null;
   let aiBusy = false, previewRevision = 0, aiReviewed = new Set();
   const personalImport = currentScope().workspace === 'personal';
+  const periodsEnabled = bankPeriodsEnabled && personalImport;
+  const periodSheet = periodsEnabled ? await db.get('sheets', sheet.id) : null;
+  assertScopeCurrent();
+  if (periodsEnabled && (!periodSheet || periodSheet.deleted)) throw Error('Your Personal ledger changed. Reopen the import.');
+  let periodDrafts = [], periodError = '';
+  const closingDates = {}, cycleMonths = {};
+  const periodHost = el('section', { class: 'bank-period-panel', hidden: true, 'aria-label': 'Card periods' });
+  const nth = pick([['', 'Choose occurrence'], ['1', 'First'], ['2', 'Second'], ['3', 'Third'], ['4', 'Fourth'], ['-1', 'Last']], String(periodSheet?.bankPeriodRule?.nth ?? ''), 'Closing weekday occurrence');
+  const weekday = pick([['', 'Choose weekday'], ['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'], ['5', 'Friday'], ['6', 'Saturday'], ['0', 'Sunday']], String(periodSheet?.bankPeriodRule?.weekday ?? ''), 'Closing weekday');
+  const periodFiles = el('div', { class: 'bank-period-files' });
+  const periodStatus = el('p', { class: 'help', role: 'status' });
+  const periodRule = () => nth.value && weekday.value !== '' ? { nth: Number(nth.value), weekday: Number(weekday.value) } : null;
   const status = el('p', { class: 'help', role: 'status' });
   const mappingHost = el('div'), preview = el('div'), sources = el('div', { class: 'bank-source-list' }), warnings = el('div', { class: 'bank-import-notes' });
   const files = el('input', { type: 'file', accept: '.xls,.xlsx', multiple: true, 'aria-label': 'Bank Excel files' });
@@ -70,12 +83,58 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     el('p', { class: 'help' }, 'Select your bank downloads together: TL, USD, EUR, statements and in-month transactions. You can include your detailed spending workbook too. No Excel editing or CSV conversion needed.'),
     field('Add your files', files), coverage,
     matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear Work matches are handled automatically.') : null,
-    summary, personalImport ? categoryPanel : null, detailsBatch, exceptions, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
+    summary, periodsEnabled ? periodHost : null, personalImport ? categoryPanel : null, detailsBatch, exceptions, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
   const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
   const active = () => scopeIsCurrent() && dialog.open && dialog.isConnected && !aborter.signal.aborted;
   const invalidate = () => { previewRevision++; valid = false; selected.clear(); saveButton.disabled = true; status.textContent = 'Options changed. Apply options to continue.'; preview.replaceChildren(el('p', { class: 'help' }, 'Apply your import options to update this list.')); };
   const fail = error => { if (active()) { status.textContent = error.message || 'Could not read the files.'; status.classList.add('error'); } };
   const safe = run => async () => { try { assertScopeCurrent(); await run(); } catch (error) { fail(error); } };
+
+  function refreshPeriods() {
+    if (!periodsEnabled) return;
+    periodError = '';
+    try {
+      if (!!nth.value !== (weekday.value !== '')) throw Error('Choose both parts of the weekday schedule, or leave both empty.');
+      periodDrafts = buildBankPeriodDrafts(parsed, workbooks, { rule: periodRule(), closingDates, cycleMonth: cycleMonths });
+    } catch (error) { periodDrafts = []; periodError = error.message; }
+    const registry = periodError ? [] : mergeBankPeriods(periodSheet.bankPeriods || [], periodDrafts, plan, { selectedIds: [...selected], expenses: existing });
+    let missingDate = false;
+    for (const node of periodFiles.querySelectorAll('[data-period-date-preview]')) {
+      const drafts = periodDrafts.filter(item => item.fileIndex === Number(node.dataset.periodDatePreview));
+      const resolved = drafts.map(draft => registry.find(period => period.sources?.some(source => source.id === draft.sourceId)) || draft);
+      missingDate ||= resolved.some(item => !item.end);
+      const dates = [...new Set(resolved.map(item => item.end ? `${item.start ? item.start + ' to ' : 'Closes '}${item.end}${item.dateBasis === 'schedule' ? ' · from your schedule' : ''}` : 'Closing date not set'))];
+      node.textContent = dates.join(' · ');
+    }
+    periodStatus.textContent = periodError || (missingDate ? 'These files identify the statement status, but not its closing date. You can save them now and add dates later by reimporting.' : 'Dates follow the file or your saved choices. The payment due date is separate; spending totals are not the bank balance due.');
+    updateSave();
+  }
+  function paintPeriods() {
+    if (!periodsEnabled) return;
+    const bankFiles = parsed.map((file, index) => ({ file, index })).filter(({ file }) => ['garanti-statement', 'garanti-in-month'].includes(file.sourceType));
+    periodHost.hidden = !bankFiles.length;
+    periodFiles.replaceChildren(...bankFiles.map(({ file, index }) => {
+      const date = el('input', { type: 'date', value: closingDates[index] || '', min: '1901-01-01', max: '9998-12-31', 'aria-label': `Statement closing date ${index + 1}` });
+      const month = el('input', { type: 'month', value: cycleMonths[index] || '', min: '1901-02', max: '9998-12', 'aria-label': `Statement closing month ${index + 1}` });
+      date.addEventListener('change', () => { closingDates[index] = date.value; refreshPeriods(); });
+      month.addEventListener('change', () => { cycleMonths[index] = month.value; refreshPeriods(); });
+      return el('div', { class: 'bank-period-file' }, el('strong', {}, file.metadata.fileName),
+        el('span', {}, file.sourceType === 'garanti-statement' ? 'Closed · statement issued' : 'Ongoing · period still open'),
+        el('small', { 'data-period-date-preview': String(index) }),
+        el('details', {}, el('summary', {}, 'Set period dates (optional)'), el('div', { class: 'grid2' }, field('Closing month · uses your weekday schedule', month), field('Exact closing date · overrides schedule', date))));
+    }));
+    periodHost.replaceChildren(el('h3', {}, 'Card periods'), periodFiles,
+      el('details', {}, el('summary', {}, 'Usual closing schedule'), el('div', { class: 'grid2' }, field('Occurrence', nth), field('Weekday', weekday)), el('p', { class: 'help' }, 'Saved with your account. Choose a closing month for each file to use this schedule.')), periodStatus);
+    refreshPeriods();
+  }
+  nth.addEventListener('change', refreshPeriods); weekday.addEventListener('change', refreshPeriods);
+  function periodChanges(expenses = existing, sourcePlan = plan, at) {
+    if (!periodsEnabled || !periodDrafts.length || periodError) return null;
+    const bankPeriods = mergeBankPeriods(periodSheet.bankPeriods || [], periodDrafts, sourcePlan, { selectedIds: [...selected], expenses, at });
+    const bankPeriodRule = periodRule();
+    if (JSON.stringify(bankPeriods) === JSON.stringify(periodSheet.bankPeriods || []) && JSON.stringify(bankPeriodRule) === JSON.stringify(periodSheet.bankPeriodRule || null)) return null;
+    return { ...periodSheet, bankPeriods, bankPeriodRule };
+  }
 
   files.addEventListener('change', safe(async () => {
     if (busy || aiBusy) return; busy = true; valid = false; saveButton.disabled = true;
@@ -251,12 +310,13 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       el('small', {}, [[counts.duplicate, 'duplicates skipped'], [needsReview, 'need review'], [counts.error, 'cannot be imported'], [counts.excluded, 'excluded']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ')),
       ...(needsReview ? [el('small', { class: 'bank-review-needed' }, 'Review these before selecting them.')] : []));
     warnings.replaceChildren(...[...new Set(parsed.flatMap(file => file.warnings || []))].map(message => el('small', {}, message)));
-    paintRows();
+    paintPeriods(); paintRows();
   }
   function currentRow(item) { return { ...item.row, ...edited.get(item.id) }; }
   function updateSave() {
-    saveButton.disabled = !valid || !selected.size || busy || aiBusy;
-    saveButton.textContent = selected.size ? `Import ${selected.size} transaction${selected.size === 1 ? '' : 's'}` : 'Import';
+    const periodWrite = valid && !!periodChanges();
+    saveButton.disabled = !valid || (!selected.size && !periodWrite) || !!periodError || busy || aiBusy;
+    saveButton.textContent = selected.size ? `Import ${selected.size} transaction${selected.size === 1 ? '' : 's'}` : periodWrite ? 'Save statement information' : 'Import';
     if (valid && summary.firstElementChild) summary.firstElementChild.textContent = selected.size ? `${selected.size} transaction${selected.size === 1 ? '' : 's'} ready to import` : 'No transactions selected';
   }
   function paintRows() {
@@ -298,10 +358,14 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     updateSave();
   }
   saveButton.addEventListener('click', safe(async () => {
-    if (!valid || busy || aiBusy || !selected.size) return;
+    if (!valid || busy || aiBusy || periodError || (!selected.size && !periodChanges())) return;
     busy = true; saveButton.disabled = true; body.inert = true;
     try {
       const latest = await db.all('expenses'); if (!active()) return;
+      if (periodsEnabled) {
+        const latestSheet = await db.get('sheets', sheet.id); if (!active()) return;
+        if (!latestSheet || latestSheet.deleted || latestSheet.updated_at !== periodSheet.updated_at) throw Error('Your statement information changed on another screen or device. Reopen this import to use the latest version.');
+      }
       const fresh = planBankImport(parsed, latest, { cardAliases: aliases, keepReferenceRows: keepReferences.checked, restorePersonalReset: currentScope().workspace === 'personal' });
       const chosen = plan.filter(item => ready(item) && selected.has(item.id));
       for (const item of chosen) {
@@ -332,10 +396,12 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       }
       assertScopeCurrent();
       const matched = prepared.matched, matchMessage = String(prepared.message || '');
-      await atomicBatchSave(prepared.items, { label: `Import ${chosen.length} bank transactions / updates${matched ? ` · ${matched} matched to Work` : ''}`, ...(matched ? { expectedExpenses: latest } : {}) });
+      const periodRecord = periodChanges(latest, fresh, at);
+      if (periodRecord) prepared.items.push({ table: 'sheets', record: periodRecord, expectedUpdatedAt: periodSheet.updated_at });
+      await atomicBatchSave(prepared.items, { label: chosen.length ? `Import ${chosen.length} bank transactions / updates${matched ? ` · ${matched} matched to Work` : ''}` : 'Save bank statement information', ...((matched || periodRecord) ? { expectedExpenses: latest } : {}) });
       if (!active()) return;
       dialog.close();
-      const imported = prepared.items.filter(item => !item.record.deleted).map(item => item.record);
+      const imported = prepared.items.filter(item => item.table === 'expenses' && !item.record.deleted).map(item => item.record);
       const months = [...new Set(imported.map(row => String(row.date || '').slice(0, 7)).filter(month => /^\d{4}-\d{2}$/.test(month)))].sort();
       await onChange({ entry: imported.slice().sort((a, b) => String(b.date).localeCompare(String(a.date)))[0],
         importSummary: { count: chosen.filter(item => item.status !== 'enrichment').length, updated: chosen.filter(item => item.status === 'enrichment').length,
@@ -344,7 +410,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
           workCount: imported.filter(row => spending(row) && row.spendingPurpose === 'business').length,
           skippedReview: plan.filter(item => item.status === 'possible-match' && !selected.has(item.id)).length,
           unread: plan.filter(item => item.status === 'error').length, months }, ...(matchWork ? { matched, matchMessage } : {}) });
-      sync(); toast(`${chosen.length} transactions saved.${matched ? ` ${matched} matched to Work.` : ''} The whole import has one History Undo.${matchMessage ? ` ${matchMessage}` : ''}`);
+      sync(); toast(`${chosen.length ? `${chosen.length} transactions saved.` : 'Statement information saved.'}${matched ? ` ${matched} matched to Work.` : ''} The whole import has one History Undo.${matchMessage ? ` ${matchMessage}` : ''}`);
     } finally { busy = false; if (active()) { body.inert = false; updateSave(); } }
   }));
   return dialog;

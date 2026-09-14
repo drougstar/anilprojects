@@ -201,20 +201,25 @@ function isDatedCandidate(value) { return value instanceof Date || typeof value 
 
 function parseGaranti(sheets, context, options) {
   const result = []; let recognized = false;
+  const fileSourceType = /^ekstre\b|\bekstre islemleri\b/.test(fold(context.fileName)) ? 'garanti-statement' : 'garanti-in-month';
   for (const sheet of sheets) {
-    let columns = null, pending = false, card = options.account || options.card || aliasName(context.fileName), currency = currencyOf(context.fileName);
+    let columns = null, pending = false, card = options.account || options.card || aliasName(context.fileName), currency = currencyOf(context.fileName), sourceType = fileSourceType;
     for (let index = 0; index < sheet.rows.length; index++) {
-      const cells = sheet.rows[index], first = text(cells[0]), joined = cells.map(text).join(' '), folded = fold(joined);
-      if (/numarali kart/.test(folded)) { const suffix = suffixOf(joined); card = suffix ? `mask:${suffix}` : ''; currency = currencyOf(joined); pending = false; columns = null; }
-      if (/^acik provizyon\b/.test(fold(first))) { pending = true; columns = null; }
-      if (/^donemici islemler\b/.test(fold(first))) { pending = false; columns = null; }
+      const cells = sheet.rows[index], populated = cells.filter(present), heading = populated.length === 1 ? fold(populated[0]) : '';
+      // Bank section headings occupy a single cell. Transaction descriptions can
+      // contain the same words, so never use a transaction to reset the table.
+      const cardHeading = /numarali kart/.test(heading);
+      if (cardHeading) { const suffix = suffixOf(populated[0]); card = suffix ? `mask:${suffix}` : ''; currency = currencyOf(populated[0]); pending = false; columns = null; }
+      if (/^ekstre islemleri\b/.test(heading) || (cardHeading && /\bekstre bilgileri\b/.test(heading))) { sourceType = 'garanti-statement'; pending = false; columns = null; }
+      if (/^acik provizyon\b/.test(heading)) { sourceType = 'garanti-in-month'; pending = true; columns = null; }
+      if (/^donemici islemler\b/.test(heading)) { sourceType = 'garanti-in-month'; pending = false; columns = null; }
       const at = headerIndex(cells), amountIndex = cells.findIndex(v => /^tutar\s*\(/.test(fold(v)));
       if (at('tarih') >= 0 && at('islem') >= 0 && amountIndex >= 0) {
         columns = { date: at('tarih'), description: at('islem'), category: at('etiket'), amount: amountIndex };
         currency = currencyOf(cells[amountIndex]) || currency; recognized = true; continue;
       }
       if (!columns || !isDatedCandidate(cells[columns.date])) continue;
-      result.push(normalizedRow({ date: cells[columns.date], description: cells[columns.description], bankCategory: cells[columns.category], amount: cells[columns.amount], currency, card, pending }, { ...context, sourceType: /numarali kart|ekstre islemleri/.test(`${fold(context.fileName)} ${folded}`) || fold(context.fileName).startsWith('ekstre') ? 'garanti-statement' : 'garanti-in-month', sheetName: sheet.name, rowNumber: index + 1, decimal: 'comma', bankSigns: true }));
+      result.push(normalizedRow({ date: cells[columns.date], description: cells[columns.description], bankCategory: cells[columns.category], amount: cells[columns.amount], currency, card, pending }, { ...context, sourceType, sheetName: sheet.name, rowNumber: index + 1, decimal: 'comma', bankSigns: true }));
     }
   }
   return { rows: result, recognized };

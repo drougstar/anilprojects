@@ -79,18 +79,27 @@ function recurringCandidates(history, currentEntries, currency) {
   return result.sort((a, b) => b.currentMinor - a.currentMinor || a.label.localeCompare(b.label));
 }
 
-export function analyzePersonalStudy(rows, { month, dateFrom = '', dateTo = '', currency, categories = [], purpose, card, budgets = [], filters = {} } = {}) {
+export function analyzePersonalStudy(rows, { month, dateFrom = '', dateTo = '', currency, categories = [], purpose, card, budgets = [], filters = {}, historyRows, bankPeriod = null } = {}) {
   const bounds = personalPeriodBounds({ month, dateFrom, dateTo });
   purpose ??= filters.purpose || 'all'; card ??= filters.card || '';
   currency = clean(currency).toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) throw Error('Choose a three-letter currency.');
   if (!purposes.some(([value]) => value === purpose)) throw Error('Choose a valid spending purpose.');
   if (!Array.isArray(rows)) throw Error('Study records must be an array.');
+  if (historyRows !== undefined && !Array.isArray(historyRows)) throw Error('Study history must be an array.');
   const active = rows.filter(row => row && typeof row === 'object' && !row.deleted && !row.perdiem);
   // This local guard also protects the Study view while older imported records
   // are migrated to the shared Personal normalizer's exclusion fields.
   const normalized = normalizePersonalEntries(active.filter(row => !movementKind(row)), { categories });
-  const history = normalized.entries.map(entry => ({ ...entry, purpose: purposeOf(entry.source), cardKey: cardOf(entry.source).key, cardLabel: cardOf(entry.source).label }));
+  const studyEntry = entry => ({ ...entry, purpose: purposeOf(entry.source), cardKey: cardOf(entry.source).key, cardLabel: cardOf(entry.source).label });
+  const history = normalized.entries.map(studyEntry);
+  // Statement members still own every total and drill-down. Older Personal
+  // records provide evidence for repeats only; never append them to the view.
+  let repeatHistory = history;
+  if (historyRows !== undefined) {
+    const earlier = normalizePersonalEntries(historyRows.filter(row => row && typeof row === 'object' && !row.deleted && !row.perdiem && row.sourceWorkspace !== 'work' && !movementKind(row)), { categories });
+    repeatHistory = [...new Map([...earlier.entries, ...normalized.entries].map(entry => [entry.id, entry])).values()].map(studyEntry);
+  }
   const monthEntries = history.filter(entry => entry.currency === currency && entry.date >= bounds.first && entry.date <= bounds.last);
   const selectedFilters = { ...filters, purpose, card };
   const entries = filterPersonalViewEntries(monthEntries, selectedFilters);
@@ -131,7 +140,7 @@ export function analyzePersonalStudy(rows, { month, dateFrom = '', dateTo = '', 
   // The shared UI also keeps the selected period in its filter snapshot. Those
   // endpoints restrict current spending, not the earlier evidence for repeats.
   const { dateFrom: _rangeStart, dateTo: _rangeEnd, ...historyFilters } = selectedFilters;
-  const recurringHistory = filterPersonalViewEntries(history.filter(entry => entry.date <= bounds.last), historyFilters);
+  const recurringHistory = filterPersonalViewEntries(repeatHistory.filter(entry => entry.date <= bounds.last), historyFilters);
   const purposeTotals = purposes.slice(1).map(([value, label]) => ({ purpose: value, label, ...sumEntries(filterPersonalViewEntries(monthEntries, { ...selectedFilters, purpose: value }), currency) }));
   return { month, currency, period: bounds, isRange: bounds.isRange, purpose, card, entries, totals: sumEntries(entries, currency), purposeTotals,
     categories: groupEntries(entries, 'category', currency), merchants: groupEntries(entries, 'merchant', currency), cards: groupEntries(entries, 'card', currency),
@@ -140,7 +149,9 @@ export function analyzePersonalStudy(rows, { month, dateFrom = '', dateTo = '', 
     recurring: recurringCandidates(recurringHistory, entries, currency), budgets: budgetData.results, budgetIssues: budgetData.issues, budgetNotice,
     excluded, movements, coverage: { firstRecordedDate: dates[0] || null, lastRecordedDate: dates.at(-1) || null,
       recordedDays: new Set(dates).size, calendarDays: bounds.days, completeMonthKnown: false,
-      basis: 'transaction-date', explanation: bounds.isRange
+      basis: bankPeriod ? 'statement-membership' : 'transaction-date', explanation: bankPeriod
+        ? 'This view includes transactions linked to the selected bank export, even when their purchase dates fall outside its cycle. Dates shown are purchase dates. Totals describe imported spending, not the statement balance due.'
+        : bounds.isRange
         ? 'The range includes both selected dates and uses transaction dates, not statement closing dates. Recorded dates do not prove that every purchase is present.'
         : 'Months use transaction dates, not statement closing dates. Recorded dates do not prove a complete month; a statement can cover parts of two months.' },
     issues: [...issues, ...movementIssues] };
@@ -155,7 +166,7 @@ function select(label, options, selected, change) {
   return el('label', { class: 'study-filter' }, el('span', {}, label), field);
 }
 
-export function renderPersonalStudy({ rows, month, dateFrom = '', dateTo = '', currency, categories = [], budgets = [], filters = {}, sharedFilters = false, onFiltersChange, onOpenEntry, onOpenBudgets, onImport }) {
+export function renderPersonalStudy({ rows, month, dateFrom = '', dateTo = '', currency, categories = [], budgets = [], filters = {}, historyRows, bankPeriod = null, sharedFilters = false, onFiltersChange, onOpenEntry, onOpenBudgets, onImport }) {
   const root = el('div', { class: 'personal-study' });
   const state = { purpose: filters.purpose || 'all', card: filters.card || '', detail: null, visible: 25 };
   const change = values => { Object.assign(state, values, { detail: null }); if (onFiltersChange) onFiltersChange(values); else paint(); };
@@ -193,7 +204,7 @@ export function renderPersonalStudy({ rows, month, dateFrom = '', dateTo = '', c
     return panel(title, list);
   }
   function paint() {
-    model = analyzePersonalStudy(rows, { month, dateFrom, dateTo, currency, categories, budgets, filters, purpose: state.purpose, card: state.card });
+    model = analyzePersonalStudy(rows, { month, dateFrom, dateTo, currency, categories, budgets, filters, historyRows, bankPeriod, purpose: state.purpose, card: state.card });
     const controls = sharedFilters ? null : el('div', { class: 'study-filters' }, select('Purpose', purposes, state.purpose, value => change({ purpose: value })),
       select('Card', [['', 'All cards'], ...model.availableCards.map(item => [item.key, item.label])], state.card, value => change({ card: value })),
       onImport ? btn('Import bank files', onImport) : null);
@@ -203,7 +214,7 @@ export function renderPersonalStudy({ rows, month, dateFrom = '', dateTo = '', c
       el('div', {}, el('span', {}, 'Purchases'), el('strong', {}, money(total.purchasesMinor, currency))),
       el('div', {}, el('span', {}, 'Refunds'), el('strong', {}, money(total.refundsMinor, currency))));
     const purposeLinks = el('div', { class: 'study-purpose-totals' }, ...model.purposeTotals.map(item => btn(`${item.label}: ${money(item.netMinor, currency)} (${item.count})`, () => change({ purpose: item.purpose }), { class: 'link', 'aria-pressed': String(state.purpose === item.purpose) })));
-    const periodName = model.isRange ? 'range' : 'month';
+    const periodName = bankPeriod ? 'bank period' : model.isRange ? 'range' : 'month';
     const coverage = model.coverage.firstRecordedDate ? `${dateText(model.coverage.firstRecordedDate)}–${dateText(model.coverage.lastRecordedDate)} recorded · ${model.coverage.recordedDays} transaction days.` : `No dated records in this ${periodName} and currency.`;
     root.replaceChildren(...[controls, summary, purposeLinks, el('p', { class: 'study-coverage' }, coverage, ' ', model.coverage.explanation), el('p', { class: 'study-error', role: 'alert' }, model.issues.length ? `${model.issues.length} invalid record${model.issues.length === 1 ? '' : 's'} excluded. Review the source before relying on totals.` : '')].filter(Boolean));
     if (!model.entries.length && !model.excluded.length) root.append(panel('Study your spending', el('p', {}, 'Import bank statements or add transactions. Categories, cards and the largest purchases will appear here.')));

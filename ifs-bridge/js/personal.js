@@ -14,6 +14,7 @@ import { openWorkExpenseReview } from './work-match-ui.js';
 import { createWorkReconciler, matchImportedWorkPurchases } from './work-reconcile.js';
 import { readOnlyWorkContext } from './work-context.js';
 import { combineSpendingRows } from './spending-ledger.js';
+import { bankPeriodView } from './bank-periods.js';
 
 let ctx, preparation, host, view = 'overview', requestId = 0;
 let personalSession = 0, workReconciler, matching = false, matchStatus = null;
@@ -21,6 +22,7 @@ let records = [], budgets = [], inboxCount = 0, conflictCount = 0;
 let workSnapshot = null, ledger = { warnings: [], possibleDuplicates: [] }, workCoverage = null, importReceipt = null;
 let dataSnapshot = null, dataLoaded = false, paintedSession = 0;
 let rangeDraft = null;
+let bankPeriods = [];
 const filterLabels = new Map();
 const state = { month: '', currency: '', filters: {}, page: 1, excludeCompany: false, excludeTrips: false };
 const PAGE_SIZE = 25;
@@ -50,7 +52,7 @@ export function initPersonal(context) {
   dataSnapshot = null; dataLoaded = false; paintedSession = 0; filterLabels.clear();
   rangeDraft = null;
   ctx = context;
-  preparation = null; records = []; budgets = []; state.filters = {}; state.page = 1;
+  preparation = null; records = []; budgets = []; bankPeriods = []; state.filters = {}; state.page = 1;
   state.excludeCompany = false; state.excludeTrips = false;
   state.month = today().slice(0, 7);
   state.currency = ctx.settings().defaultCurrency || 'TRY';
@@ -75,13 +77,13 @@ export function restorePersonalView(snapshot) {
     catch { return false; }
     filters.dateFrom = range.first; filters.dateTo = range.last;
   }
-  for (const key of ['category', 'merchant', 'kind', 'purpose', 'card', 'search', 'date']) {
+  for (const key of ['category', 'merchant', 'kind', 'purpose', 'card', 'search', 'date', 'bankPeriod']) {
     const value = snapshot.filters?.[key];
     if (typeof value !== 'string' || value.length > 500) continue;
     if (key === 'kind' && !['', 'purchase', 'refund'].includes(value)) continue;
     if (key === 'purpose' && !['', 'all', 'personal', 'business', 'review'].includes(value)) continue;
     if (key === 'date' && value) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || (range ? value < range.first || value > range.last : value.slice(0, 7) !== snapshot.month)) continue;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || (!snapshot.filters?.bankPeriod && (range ? value < range.first || value > range.last : value.slice(0, 7) !== snapshot.month))) continue;
       const [year, month, day] = value.split('-').map(Number);
       if (day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) continue;
     }
@@ -112,10 +114,21 @@ export function refreshPersonal(change) {
   }
   if (host?.isConnected && !host.hidden && currentScope().workspace === 'personal') return renderPersonal(host, view);
 }
+function historyRows() { return records.filter(row => !(state.excludeCompany && row.ledgerWork) && !(state.excludeTrips && row.ledgerTrip)); }
 function includedRows() {
-  return records.filter(row => !(state.excludeCompany && row.ledgerWork) && !(state.excludeTrips && row.ledgerTrip));
+  const members = state.filters.bankPeriod ? new Set(selectedBankPeriod()?.memberIds || []) : null;
+  return historyRows().filter(row => !members || members.has(row.id));
 }
+function selectedBankPeriod() { return bankPeriods.find(period => period.id === state.filters.bankPeriod); }
 function selectedPeriod() {
+  if (state.filters.bankPeriod) {
+    const period = selectedBankPeriod();
+    // Statement membership is authoritative. An installment may retain a
+    // purchase date outside the cycle and must still count in this statement.
+    const ids = new Set(period?.memberIds || []);
+    const dates = [...records.filter(row => ids.has(row.id)).map(row => row.date), period?.start, period?.end].filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date || '')).sort();
+    return { month: state.month, dateFrom: dates[0] || state.month + '-01', dateTo: dates.at(-1) || state.month + '-01' };
+  }
   return { month: state.month, dateFrom: state.filters.dateFrom || '', dateTo: state.filters.dateTo || '' };
 }
 function loadWorkSnapshot() {
@@ -145,7 +158,7 @@ function navigateTransactions(filters = {}) {
 }
 function setMonth(value) {
   if (!scopeIsCurrent() || !validMonth(value)) return false;
-  rangeDraft = null; delete state.filters.dateFrom; delete state.filters.dateTo;
+  rangeDraft = null; delete state.filters.dateFrom; delete state.filters.dateTo; delete state.filters.bankPeriod;
   // A selected chart day follows the same day number; short months use their last day.
   if (/^\d{4}-\d{2}-\d{2}$/.test(state.filters.date || '')) {
     const [year, month] = value.split('-').map(Number);
@@ -173,7 +186,7 @@ async function importBank() {
   const isCurrent = () => session === personalSession && scopeIsCurrent();
   const sheet = await preparation;
   if (!isCurrent()) return;
-  return openBankImport({ settings, sheet, aiClient: supabaseClient,
+  return openBankImport({ settings, sheet, aiClient: supabaseClient, bankPeriodsEnabled: true,
     onChange: change => {
       if (!isCurrent()) return;
       if (change?.matchMessage) matchStatus = { state: change.matched ? 'matched' : 'complete', message: change.matchMessage, matched: change.matched || 0 };
@@ -245,9 +258,9 @@ function editEntry(entry) {
 }
 function exportMonth() {
   const csv = exportPersonalMonthCsv(includedRows(), { ...selectedPeriod(), categories: ctx.settings().expenseCodes });
-  const period = state.filters.dateFrom ? `${state.filters.dateFrom}-to-${state.filters.dateTo}` : state.month;
+  const period = state.filters.bankPeriod ? 'bank-statement' : state.filters.dateFrom ? `${state.filters.dateFrom}-to-${state.filters.dateTo}` : state.month;
   download(`personal-spending-${period}.csv`, csv, 'text/csv;charset=utf-8');
-  toast(`Exported the selected ${state.filters.dateFrom ? 'date range' : 'month'} in all currencies, using the company and trip exclusions above. Other filters do not change this export.`);
+  toast(`Exported the selected ${state.filters.bankPeriod ? 'bank period' : state.filters.dateFrom ? 'date range' : 'month'}, using the company and trip exclusions above. Other filters do not change this export.`);
 }
 
 export async function renderPersonal(root, nextView = 'overview') {
@@ -271,7 +284,7 @@ export async function renderPersonal(root, nextView = 'overview') {
       if (!dataSnapshot) {
         const pending = preparation.then(() => {
           if (session !== personalSession || !scopeIsCurrent()) return null;
-          return Promise.all([live('expenses'), live('inbox'), db.all('conflicts'), live('budgets'), loadWorkSnapshot()]);
+          return Promise.all([live('expenses'), live('inbox'), db.all('conflicts'), live('budgets'), loadWorkSnapshot(), live('sheets')]);
         });
         dataSnapshot = pending;
         pending.catch(() => { if (dataSnapshot === pending) dataSnapshot = null; });
@@ -290,6 +303,8 @@ export async function renderPersonal(root, nextView = 'overview') {
         workCoverage = { source: 'unavailable', notice: 'Work records could not be combined. Your Personal records are shown; the combined total is incomplete. Use Refresh all spending to try again.' };
       }
       records = ledger.rows;
+      bankPeriods = loaded[5].flatMap(sheet => (sheet.bankPeriods || []).map(period => bankPeriodView(period, loaded[0])))
+        .sort((a, b) => `${b.end}|${b.id}`.localeCompare(`${a.end}|${a.id}`));
       budgets = loaded[3];
       inboxCount = loaded[1].filter(item => !['created', 'matched', 'done', 'imported'].includes(item.status)).length;
       conflictCount = loaded[2].length;
@@ -307,7 +322,7 @@ export async function renderPersonal(root, nextView = 'overview') {
     else if (workCoverage.notice) coverageWarnings.unshift(workCoverage.notice);
     if (coverageWarnings.length) root.append(el('div', { class: 'personal-warning', role: 'status', 'data-spending-coverage': '' }, ...[...new Set(coverageWarnings)].map(text => el('p', {}, text))));
     if (model.warnings?.length) root.append(el('div', { class: 'personal-warning', role: 'alert' }, ...model.warnings.map(text => el('p', {}, text))));
-    if (view === 'study') root.append(renderPersonalStudy({ rows: includedRows(), ...selectedPeriod(), currency: state.currency,
+    if (view === 'study') root.append(renderPersonalStudy({ rows: includedRows(), historyRows: historyRows(), bankPeriod: selectedBankPeriod(), ...selectedPeriod(), currency: state.currency,
       categories: ctx.settings().expenseCodes, budgets, filters: state.filters, sharedFilters: true,
       onFiltersChange: change => { if (scopeIsCurrent()) { state.filters = { ...state.filters, ...change }; state.page = 1; changedView(); renderPersonal(host, view); } },
       onOpenEntry: entry => act(() => editEntry(entry))(), onOpenBudgets: act(openBudgets) }));
@@ -409,10 +424,10 @@ function toolbar(model) {
     item(matching ? 'Checking Work…' : 'Match with Work', matchWithWork, { 'data-match-with-work': '', disabled: matching }),
     item('Review exceptions', reviewBank),
     item('Refresh all spending', () => refreshPersonal()),
-    item(`Export ${state.filters.dateFrom ? 'date range' : 'month'} · all currencies`, exportMonth, { disabled: !model.currencyTotals.some(entry => entry.count) }),
+    item(`Export ${state.filters.bankPeriod ? 'bank period' : state.filters.dateFrom ? 'date range' : 'month'}${state.filters.bankPeriod ? '' : ' · all currencies'}`, exportMonth, { disabled: !model.currencyTotals.some(entry => entry.count) }),
     item('History', openActivity), item('Other tools', openExpenseTools),
     item('Reset Personal transactions', () => openPersonalReset({ client: supabaseClient, backup: backupJson, onReset: refreshPersonal })),
-    item('This month', () => setMonth(today().slice(0, 7)), { disabled: state.month === today().slice(0, 7) && !state.filters.dateFrom && !rangeDraft }),
+    item('This month', () => setMonth(today().slice(0, 7)), { disabled: state.month === today().slice(0, 7) && !state.filters.dateFrom && !rangeDraft && !state.filters.bankPeriod }),
     el('span', { id: 'exp-sync', class: 'personal-connection', role: 'status', 'aria-live': 'polite' }, syncText)));
   more.addEventListener('keydown', event => { if (event.key === 'Escape') { more.open = false; more.querySelector('summary').focus(); } });
   return el('div', { class: 'personal-toolbar' },
@@ -427,16 +442,33 @@ function toolbar(model) {
 }
 function periodControls(month) {
   const custom = !!(rangeDraft || state.filters.dateFrom);
-  const mode = choice('Spending period', [['month', 'Month'], ['range', 'Date range']], custom ? 'range' : 'month', value => {
+  const chooseBankPeriod = id => {
+    state.filters.bankPeriod = id || 'unavailable'; rangeDraft = null;
+    delete state.filters.dateFrom; delete state.filters.dateTo; delete state.filters.date;
+    const period = selectedBankPeriod();
+    if (period?.currency) state.currency = period.currency;
+    state.page = 1; changedView(); renderPersonal(host, view);
+  };
+  const mode = choice('Spending period', [['month', 'Month'], ['range', 'Date range'], ['bank', 'Bank period']], rangeDraft ? 'range' : state.filters.bankPeriod ? 'bank' : custom ? 'range' : 'month', value => {
+    if (value === 'bank') { chooseBankPeriod(bankPeriods[0]?.id); return; }
     if (value === 'range') {
       const bounds = personalPeriodBounds(selectedPeriod());
       rangeDraft = { from: bounds.first, to: bounds.last };
     } else {
-      rangeDraft = null; delete state.filters.dateFrom; delete state.filters.dateTo; delete state.filters.date;
+      rangeDraft = null; delete state.filters.dateFrom; delete state.filters.dateTo; delete state.filters.date; delete state.filters.bankPeriod;
       state.page = 1; changedView();
     }
     renderPersonal(host, view);
   });
+  if (state.filters.bankPeriod && !rangeDraft) {
+    const period = selectedBankPeriod();
+    const options = bankPeriods.map(item => [item.id, `${item.card} · ${item.currency} · ${item.end || item.sources?.find(source => source.id === item.authoritativeSourceId)?.sourceFile || item.sources?.[0]?.sourceFile || 'Date not set'} · ${item.status === 'closed' ? 'Closed' : 'Ongoing'}`]);
+    if (!period) options.unshift([state.filters.bankPeriod, 'No saved period selected']);
+    return el('div', { class: 'personal-period personal-bank-period' }, mode, choice('Bank period', options, state.filters.bankPeriod, chooseBankPeriod),
+      el('div', { class: 'personal-bank-period-info', role: 'status' }, period
+        ? `${period.status === 'closed' ? 'Closed · statement issued' : 'Ongoing · period still open'}${period.end ? ` · ${period.start ? period.start + ' to ' : 'Closes '}${period.end}` : ' · Closing date not set'}${period.dateBasis === 'schedule' ? ' (from your schedule)' : ''}. ${period.importedSpendingCount} of ${period.expectedSpendingCount} spending rows available.${period.dueDate ? ` Payment due: ${period.dueDate}.` : ' Payment due date not provided.'} Totals show spending in this file, not the bank balance due.`
+        : 'Import your bank files to save their periods. If this period was removed, choose another period or Month.'));
+  }
   if (!custom) return el('div', { class: 'personal-period' }, mode,
     el('div', { class: 'personal-month' }, button('‹', () => shiftMonth(-1), { 'aria-label': 'Previous month', disabled: state.month === '1000-01' }), month,
       button('›', () => shiftMonth(1), { 'aria-label': 'Next month', disabled: state.month === '9999-12' })));
@@ -450,7 +482,7 @@ function periodControls(month) {
     try {
       if (!from.value || !to.value) throw Error('Choose both dates.');
       const bounds = personalPeriodBounds({ month: state.month, dateFrom: from.value, dateTo: to.value });
-      state.filters = { ...state.filters, dateFrom: bounds.first, dateTo: bounds.last }; delete state.filters.date;
+      state.filters = { ...state.filters, dateFrom: bounds.first, dateTo: bounds.last }; delete state.filters.date; delete state.filters.bankPeriod;
       rangeDraft = null; state.page = 1; changedView(); renderPersonal(host, view);
     } catch (error) { message.textContent = error.message; }
   };
@@ -461,7 +493,7 @@ function periodControls(month) {
 }
 function sharedFilters(model) {
   const full = model.filterOptions;
-  const study = analyzePersonalStudy(includedRows(), { ...selectedPeriod(), currency: state.currency, categories: ctx.settings().expenseCodes });
+  const study = analyzePersonalStudy(includedRows(), { historyRows: historyRows(), bankPeriod: selectedBankPeriod(), ...selectedPeriod(), currency: state.currency, categories: ctx.settings().expenseCodes });
   const update = (key, value) => { if (!scopeIsCurrent()) return; state.filters[key] = value; state.page = 1; changedView(); renderPersonal(host, view); };
   // Keep a selected value visible even if it has no matches on this page.
   const options = (items, selected, field) => {
@@ -474,7 +506,7 @@ function sharedFilters(model) {
   // Search commits on change/Enter so repainting cannot steal focus mid-word.
   search.addEventListener('change', () => update('search', search.value));
   search.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); update('search', search.value); } });
-  const chips = Object.entries(state.filters).filter(([key, value]) => value && !['dateFrom', 'dateTo'].includes(key) && !(key === 'purpose' && value === 'all')).map(([key, value]) => {
+  const chips = Object.entries(state.filters).filter(([key, value]) => value && !['dateFrom', 'dateTo', 'bankPeriod'].includes(key) && !(key === 'purpose' && value === 'all')).map(([key, value]) => {
     const label = key === 'date' ? dateLabel(value) : key === 'purpose' ? ({ business: 'Work', personal: 'Personal', review: 'Needs review' }[value] || value) : filterLabels.get(`${key}:${value}`) || value;
     return button(`${key}: ${label} ×`, () => update(key, ''), { class: 'personal-filter-chip', 'aria-label': key === 'date' ? 'Clear day filter' : `Clear ${key} filter` });
   });

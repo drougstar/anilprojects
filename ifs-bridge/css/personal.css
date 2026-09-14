@@ -127,3 +127,6 @@ body[data-workspace="personal"] .tabs button[aria-current="page"]{background:var
   .personal-toolbar-actions{justify-content:flex-end;width:100%}.personal-toolbar-actions>.primary{flex:0 0 auto}
   body[data-workspace="personal"] .tabs{grid-template-columns:repeat(4,minmax(0,1fr))}
 }
+.personal-bank-period { flex-wrap: wrap; min-width: 0; }
+.personal-bank-period select[aria-label="Bank period"] { flex: 1 1 260px; width: 260px; max-width: 100%; min-width: 0; }
+.personal-bank-period-info { flex-basis: 100%; font-size: .85rem; line-height: 1.5; color: var(--muted); }

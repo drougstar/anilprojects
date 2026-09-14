@@ -72,3 +72,10 @@
 @media(max-width:600px) { .work-review-tabs button { flex:1 1 130px; } .work-review-controls { align-items:stretch; } }
 .bank-category-ai { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; }
 .bank-category-ai small { flex:1 1 260px; }
+.bank-period-panel { border: 1px solid var(--line, #d9dee7); border-radius: 8px; padding: 12px; margin: 12px 0; }
+.bank-period-panel h3 { margin: 0 0 8px; font-size: 1rem; }
+.bank-period-files { display: grid; gap: 8px; }
+.bank-period-file { display: grid; gap: 4px; border-bottom: 1px solid var(--line, #d9dee7); padding-bottom: 8px; overflow-wrap: anywhere; }
+.bank-period-file > span, .bank-period-file summary { font-size: .85rem; }
+.bank-period-panel > details { margin-top: 10px; }
+.bank-period-panel input, .bank-period-panel select { min-width: 0; max-width: 100%; }
