@@ -304,7 +304,7 @@ export async function renderPersonal(root, nextView = 'overview') {
       }
       records = ledger.rows;
       bankPeriods = loaded[5].flatMap(sheet => (sheet.bankPeriods || []).map(period => bankPeriodView(period, loaded[0])))
-        .sort((a, b) => `${b.end}|${b.id}`.localeCompare(`${a.end}|${a.id}`));
+        .sort((a, b) => `${b.end || b.observedEnd || ''}|${b.id}`.localeCompare(`${a.end || a.observedEnd || ''}|${a.id}`));
       budgets = loaded[3];
       inboxCount = loaded[1].filter(item => !['created', 'matched', 'done', 'imported'].includes(item.status)).length;
       conflictCount = loaded[2].length;
@@ -462,11 +462,11 @@ function periodControls(month) {
   });
   if (state.filters.bankPeriod && !rangeDraft) {
     const period = selectedBankPeriod();
-    const options = bankPeriods.map(item => [item.id, `${item.card} · ${item.currency} · ${item.end || item.sources?.find(source => source.id === item.authoritativeSourceId)?.sourceFile || item.sources?.[0]?.sourceFile || 'Date not set'} · ${item.status === 'closed' ? 'Closed' : 'Ongoing'}`]);
+    const options = bankPeriods.map(item => [item.id, `${item.card} · ${item.currency} · ${item.end ? `${item.dateBasis === 'estimated' ? 'Estimated ' : ''}${item.end}` : item.observedEnd ? `Through ${item.observedEnd}` : item.sources?.find(source => source.id === item.authoritativeSourceId)?.sourceFile || item.sources?.[0]?.sourceFile || 'Date not set'} · ${item.status === 'closed' ? 'Closed' : 'Ongoing'}`]);
     if (!period) options.unshift([state.filters.bankPeriod, 'No saved period selected']);
     return el('div', { class: 'personal-period personal-bank-period' }, mode, choice('Bank period', options, state.filters.bankPeriod, chooseBankPeriod),
       el('div', { class: 'personal-bank-period-info', role: 'status' }, period
-        ? `${period.status === 'closed' ? 'Closed · statement issued' : 'Ongoing · period still open'}${period.end ? ` · ${period.start ? period.start + ' to ' : 'Closes '}${period.end}` : ' · Closing date not set'}${period.dateBasis === 'schedule' ? ' (from your schedule)' : ''}. ${period.importedSpendingCount} of ${period.expectedSpendingCount} spending rows available.${period.dueDate ? ` Payment due: ${period.dueDate}.` : ' Payment due date not provided.'} Totals show spending in this file, not the bank balance due.`
+        ? `${period.status === 'closed' ? 'Closed · statement issued' : 'Ongoing · period still open'}${period.end ? ` · ${period.start ? period.start + ' to ' : 'Closes '}${period.end}` : period.observedEnd ? ` · Transactions through ${period.observedEnd}` : ''}${period.dateBasis === 'estimated' ? ' (estimated from bank activity)' : period.dateBasis === 'schedule' ? ' (from your schedule)' : ''}. ${period.importedSpendingCount} of ${period.expectedSpendingCount} spending rows available.${period.dueDate ? ` Payment due: ${period.dueDate}.` : ''} Totals show spending in this file, not the bank balance due.`
         : 'Import your bank files to save their periods. If this period was removed, choose another period or Month.'));
   }
   if (!custom) return el('div', { class: 'personal-period' }, mode,

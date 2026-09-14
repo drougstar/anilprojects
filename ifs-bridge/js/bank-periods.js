@@ -1,5 +1,5 @@
-// Pure statement-cycle metadata. Files establish membership; purchase dates do
-// not prove a statement closing date or the amount the bank says is due.
+// Pure statement-cycle metadata. Source files establish membership. Their last
+// posted activity can estimate a close, but never a payment deadline or balance.
 import { stableId, validDate } from './expense-workflows.js';
 import { parseBankDate } from './bank-import.js';
 
@@ -73,16 +73,48 @@ function explicitHeaders(workbook, transactionRows = []) {
 
 export function buildBankPeriodDrafts(files, workbooks = [], { rule, closingDates = {}, cycleMonth = '' } = {}) {
   if (rule) checkedRule(rule);
-  const drafts = [];
+  const drafts = [], periods = [];
   for (const [fileIndex, file] of (files || []).entries()) {
     if (!['garanti-statement', 'garanti-in-month'].includes(file?.sourceType)) continue;
     const headers = explicitHeaders(workbooks[fileIndex], file.rows), status = file.sourceType === 'garanti-statement' ? 'closed' : 'open';
     const manual = clean(closingDates[fileIndex]), month = typeof cycleMonth === 'string' ? cycleMonth : cycleMonth?.[fileIndex];
-    let end = '', start = '', dateBasis = 'unknown';
+    // Payments and transfers are posted bank activity too. Pending holds and
+    // invalid rows cannot move a statement's estimated closing date forward.
+    const posted = (file.rows || []).filter(row => !row.error && validDate(row.date) && (row.bankKind || row.kind) !== 'pending');
+    const dates = posted.map(row => row.date).sort(), observedStart = dates[0] || '', observedEnd = dates.at(-1) || '';
+    let end = '', start = '', dateBasis = 'unknown', startDateBasis = 'unknown', estimateReason = '', estimateMethod = '';
     if (manual) { end = checkedDate(manual); dateBasis = 'manual'; }
-    else if (headers.end) { end = checkedDate(headers.end); start = headers.start; dateBasis = 'bank'; }
+    else if (headers.end) { end = checkedDate(headers.end); start = headers.start; dateBasis = 'bank'; if (start) startDateBasis = 'bank'; }
     else if (rule && month) { end = closingDateForMonth(month, rule); dateBasis = 'schedule'; }
-    if (end && !start && rule) start = shifted(closingDateForMonth(adjacentMonth(end.slice(0, 7), -1), rule), 1);
+    else if (rule && observedEnd) { ({ start, end } = periodForDate(observedEnd, rule)); dateBasis = 'schedule'; startDateBasis = 'schedule'; }
+    else if (status === 'closed' && observedEnd) { end = observedEnd; dateBasis = 'estimated'; estimateMethod = 'latest-activity'; estimateReason = 'Estimated from the last posted bank transaction, including payments and transfers.'; }
+    if (end && !start && rule) { start = shifted(closingDateForMonth(adjacentMonth(end.slice(0, 7), -1), rule), 1); startDateBasis = 'schedule'; }
+    periods.push({ file, fileIndex, status, headers, start, end, dateBasis, startDateBasis, estimateReason, estimateMethod, startEstimateMethod: '', observedStart, observedEnd,
+      accounts: unique(posted.map(row => row.accountId || 'unknown')), currencies: unique(posted.map(row => row.currency).filter(Boolean)) });
+  }
+  const tryAnchors = periods.filter(period => period.status === 'closed' && period.end && period.currencies.length === 1 && period.currencies[0] === 'TRY');
+  for (const period of periods.filter(item => item.status === 'closed' && item.dateBasis === 'estimated' && !item.currencies.includes('TRY'))) {
+    // A sparse currency export can end much earlier than its TRY statement.
+    // Align only when its entire observed range and all known cards identify
+    // exactly one TRY file; filenames and their numbering are not evidence.
+    const candidates = tryAnchors.filter(anchor => period.observedStart >= anchor.observedStart && period.observedEnd <= anchor.observedEnd &&
+      period.accounts.length && !period.accounts.includes('unknown') && period.accounts.every(account => anchor.accounts.includes(account)));
+    if (candidates.length === 1) {
+      period.anchor = candidates[0]; period.end = period.anchor.end; period.estimateMethod = 'matched-try';
+      period.estimateReason = 'Estimated using the TRY statement covering these transaction dates and the same cards.';
+    }
+  }
+  for (const period of periods) {
+    if (period.status !== 'closed' || !period.end || period.start) continue;
+    const basis = period.anchor || period;
+    const earlier = periods.filter(other => other !== basis && other.status === 'closed' && other.end && other.end < basis.end &&
+      other.currencies.some(currency => basis.currencies.includes(currency)) && other.accounts.some(account => account !== 'unknown' && basis.accounts.includes(account))).sort((a, b) => a.end.localeCompare(b.end));
+    period.start = earlier.length ? shifted(earlier.at(-1).end, 1) : basis.observedStart;
+    period.startDateBasis = period.start ? 'estimated' : 'unknown';
+    period.startEstimateMethod = period.start ? earlier.length ? 'previous-close' : 'observed-first' : '';
+  }
+  for (const period of periods) {
+    const { file, fileIndex, status, headers, start, end, dateBasis, startDateBasis, estimateReason, estimateMethod, startEstimateMethod, observedStart, observedEnd } = period;
     const groups = new Map();
     for (const row of file.rows || []) {
       const key = JSON.stringify([row.accountId || 'unknown', row.currency || '']);
@@ -95,7 +127,7 @@ export function buildBankPeriodDrafts(files, workbooks = [], { rule, closingDate
       const { accountId = 'unknown', card = 'Unspecified card', currency = '' } = rows[0];
       const sourceId = identity('bank-period-source', sourceHash, accountId, currency, status);
       drafts.push({ id: identity('bank-period', accountId, currency, end || sourceId), sourceId, fileIndex, accountId, card, currency, status,
-        start, end, dateBasis, sourceFile, sourceHash, expectedCount: rows.length,
+        start, end, dateBasis, startDateBasis, estimateReason, estimateMethod, startEstimateMethod, observedStart, observedEnd, sourceFile, sourceHash, expectedCount: rows.length,
         expectedSpendingCount: rows.filter(row => row.include && !row.error).length, errorCount: rows.filter(row => row.error).length,
         sourceRows: rows.map(row => ({ sheet: row.sourceSheet, row: row.sourceRow })), ...(headers.dueDate ? { dueDate: headers.dueDate } : {}) });
     }
@@ -134,9 +166,21 @@ export function mergeBankPeriods(existing = [], drafts = [], plan = [], { select
   const accepted = new Set(plan.filter(item => selected.has(item.id) && ['new', 'possible-match', 'enrichment'].includes(item.status) &&
     !item.row?.deleted && (!expensesById.get(item.id)?.deleted || item.personalResetReimport === true)).map(item => item.id));
   const previous = new Map(existing.map(period => [period.id, period])), registry = new Map(existing.map(period => [period.id, copy(period)]));
+  const datePriority = basis => ({ manual: 3, bank: 2, schedule: 1, estimated: 0, unknown: -1 }[basis] ?? -1);
+  const estimatePriority = method => method === 'matched-try' ? 2 : method === 'latest-activity' ? 1 : 0;
+  const startPriority = method => method === 'previous-close' ? 2 : method === 'observed-first' ? 1 : 0;
   for (const incoming of drafts) {
-    const known = !incoming.end && [...registry.values()].find(period => period.end && (period.sources || []).some(source => source.id === incoming.sourceId));
-    const draft = known ? { ...incoming, id: known.id, start: known.start, end: known.end, dateBasis: known.dateBasis, ...(known.dueDate ? { dueDate: known.dueDate } : {}) } : incoming;
+    const sameSource = [...registry.values()].find(period => (period.sources || []).some(source => source.id === incoming.sourceId));
+    const known = sameSource?.end && (!incoming.end || datePriority(sameSource.dateBasis) > datePriority(incoming.dateBasis) ||
+      (sameSource.dateBasis === 'estimated' && incoming.dateBasis === 'estimated' && estimatePriority(sameSource.estimateMethod) > estimatePriority(incoming.estimateMethod))) ? sameSource : null;
+    const draft = known ? { ...incoming, id: known.id, start: known.start, end: known.end, dateBasis: known.dateBasis,
+      startDateBasis: known.startDateBasis || 'unknown', estimateReason: known.estimateReason || '', estimateMethod: known.estimateMethod || '',
+      startEstimateMethod: known.startEstimateMethod || '', ...(known.dueDate ? { dueDate: known.dueDate } : {}) } : { ...incoming };
+    // Reimporting only one file is less context, not a reason to discard a
+    // previously matched close or the start established by the prior statement.
+    if (sameSource?.end === draft.end && draft.dateBasis === 'estimated' && sameSource.start && startPriority(sameSource.startEstimateMethod) > startPriority(draft.startEstimateMethod)) {
+      draft.start = sameSource.start; draft.startDateBasis = sameSource.startDateBasis; draft.startEstimateMethod = sameSource.startEstimateMethod;
+    }
     const membership = resolvedSources(draft, plan, selected, expensesById, accepted);
     const source = { id: draft.sourceId, sourceFile: draft.sourceFile, sourceHash: draft.sourceHash, status: draft.status,
       expectedCount: draft.expectedCount, expectedSpendingCount: draft.expectedSpendingCount, errorCount: draft.errorCount || 0, ...membership };
@@ -152,6 +196,7 @@ export function mergeBankPeriods(existing = [], drafts = [], plan = [], { select
     const wasClosed = period.status === 'closed';
     if (!wasClosed || draft.status === 'closed') {
       period.status = draft.status; period.start = draft.start; period.end = draft.end; period.dateBasis = draft.dateBasis;
+      for (const field of ['startDateBasis', 'estimateReason', 'estimateMethod', 'startEstimateMethod', 'observedStart', 'observedEnd']) period[field] = draft[field] || '';
       period.authoritativeSourceId = source.id;
       if (draft.dueDate) period.dueDate = draft.dueDate;
     }

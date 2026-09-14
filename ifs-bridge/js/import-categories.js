@@ -4,9 +4,39 @@ const clean = value => String(value ?? '').trim().replace(/\s+/g, ' ');
 const norm = value => clean(value).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('en-US').replace(/ı/g, 'i').replace(/[^a-z0-9]+/g, ' ').trim();
 const categoryOf = row => clean(row.personalCategory || row.category) || 'Uncategorized';
 const merchantOf = row => clean(row.merchant || row.vendor || row.bankDescription || row.originalDescription || row.originalStatementText) || 'Unknown merchant';
-// Keep numbers and the full original descriptor: stripping transaction-looking
-// text could incorrectly learn one shop's correction for another shop.
-const identityOf = row => norm(row.originalStatementText || row.originalDescription || row.bankDescription || row.merchant || row.vendor);
+const originalOf = row => clean(row.originalStatementText || row.originalDescription || row.bankDescription || row.merchant || row.vendor);
+const serviceNames = new Map([
+  ['amazon-prime', 'Amazon Prime'], ['claude', 'Claude'], ['todoist', 'Todoist'], ['netflix', 'Netflix'], ['spotify', 'Spotify'],
+  ['youtube-premium', 'YouTube Premium'], ['chatgpt', 'ChatGPT'], ['microsoft-365', 'Microsoft 365'], ['adobe-creative-cloud', 'Adobe Creative Cloud'], ['disney-plus', 'Disney+']
+]);
+const serviceDescriptors = [
+  ['amazon-prime', /^(?:amazon|amzn)\s+(?:prime(?:\s+video)?|prim(?=\*))(?=$|[\s*])/i],
+  ['claude', /^anthropic(?:[\s*]+claude)?(?=$|[\s*])/i],
+  ['todoist', /^todoist(?:\s+(?:pro|business))?(?=$|[\s*])/i],
+  ['netflix', /^netflix(?:[.\s]+com)?(?=$|[\s*])/i],
+  ['spotify', /^spotify(?:[\s*]+(?:ab|premium))?(?=$|[\s*])/i],
+  ['youtube-premium', /^(?:google[\s*]+)?youtube\s+premium(?=$|[\s*])/i],
+  ['chatgpt', /^(?:openai[\s*]+chatgpt(?:\s+(?:subscription|subscr))?|chatgpt\s+(?:plus|pro))(?=$|[\s*])/i],
+  ['microsoft-365', /^(?:microsoft|office)\s+365(?=$|[\s*])/i],
+  ['adobe-creative-cloud', /^adobe\s+creative\s+cloud(?=$|[\s*])/i],
+  ['disney-plus', /^disney(?:\s*plus|\+)(?:[.\s]+com)?(?=$|[\s*])/i]
+];
+function serviceFamily(descriptor) {
+  for (const [family, pattern] of serviceDescriptors) {
+    const match = pattern.exec(descriptor); if (!match) continue;
+    let suffix = clean(descriptor.slice(match[0].length));
+    // Only a recognized service may drop its reference token. Keep all digits
+    // for unknown merchants, where they can distinguish separate shops.
+    const reference = /^\*?\s*([a-z0-9-]{4,40})(?=\s|$)/i.exec(suffix);
+    if (reference && /[a-z]/i.test(reference[1]) && /\d/.test(reference[1])) suffix = clean(suffix.slice(reference[0].length));
+    const location = norm(suffix);
+    if (!location || /^(?:(?:luxembourg|san francisco|sanfrancisco|dover|stockholm|amsterdam|los gatos|redmond|san bruno|san jose|dublin|london|burbank)(?: (?:ca|wa|de|us|usa|lu|nl|se|gb|ie|uk|sweden|netherlands|ireland))*|us|usa|lu|nl|se|gb|ie|uk|sweden|netherlands|ireland)$/.test(location)) return family;
+  }
+  return '';
+}
+// Known service billing variants share a review group. Every other merchant
+// keeps its full original identity, including numbers and location text.
+const identityOf = row => { const original = originalOf(row), family = serviceFamily(original); return family ? `service:${family}` : norm(original); };
 const currencyOf = row => clean(row.currency).toUpperCase();
 const kindOf = row => clean(row.bankKind || row.kind || (Number(row.amount) < 0 ? 'refund' : 'purchase'));
 const unassigned = value => !value || ['uncategorized', 'unassigned', 'unknown', 'other', 'diger', 'siniflandirilmamis'].includes(norm(value));
@@ -28,7 +58,7 @@ const explicitCorrection = row => {
   return (row.bankReviewFields || []).includes('personalCategory') &&
     !!clean(row.bankCategory) && norm(category) !== norm(row.bankCategory);
 };
-const knownService = identity => /^(?:netflix(?: com)?|spotify(?: ab| premium)?|youtube premium|google youtube premium|openai chatgpt(?: subscription)?|chatgpt(?: plus| pro)|microsoft 365|office 365|adobe creative cloud|amazon prime(?: video)?|disney plus|disneyplus(?: com)?)$/.test(identity);
+const knownService = identity => identity.startsWith('service:');
 // Marketplaces and ordinary shopping are not subscription evidence merely
 // because a shopper returns every month. Narrow service descriptors above win.
 const ambiguousSeller = identity => /\b(?:apple|itunes|amazon|amzn|microsoft|adobe|google|youtube|paypal|iyzico|paytr|market|supermarket|migros|carrefour|walmart|aldi|lidl|bim|a101|sok|trendyol|hepsiburada|restaurant|restoran|cafe|coffee|starbucks|shell|petrol|fuel|grocery|groceries|shopping|store|shop)\b/.test(identity);
@@ -97,8 +127,10 @@ export function suggestImportCategories(plan, existingRows = []) {
     addEvidence({ ...row, id: item.id });
     if (!own(row) || reference(row) || protectedCategory(item)) continue;
     const identity = identityOf(row), currency = currencyOf(row), currentCategory = categoryOf(row);
-    const key = JSON.stringify([identity, currency, norm(currentCategory)]);
-    const group = groups.get(key) || { id: `import-category:${encodeURIComponent(key)}`, merchant: merchantOf(row), currency, currentCategory, itemIds: [], category: '', reason: '', source: 'unassigned', confidence: 'low', rows: [], identity };
+    const family = knownService(identity), key = JSON.stringify([identity, currency, family ? '' : norm(currentCategory)]);
+    const group = groups.get(key) || { id: `import-category:${encodeURIComponent(key)}`, merchant: family ? serviceNames.get(identity.slice(8)) : merchantOf(row), currency, currentCategory, currentCategories: [], itemIds: [], category: '', reason: '', source: 'unassigned', confidence: 'low', rows: [], identity };
+    if (!group.currentCategories.some(category => norm(category) === norm(currentCategory))) group.currentCategories.push(currentCategory);
+    group.currentCategory = group.currentCategories.length > 1 ? 'Mixed categories' : group.currentCategories[0];
     if (!group.itemIds.includes(item.id)) { group.itemIds.push(item.id); group.rows.push(row); }
     groups.set(key, group);
   }
@@ -108,10 +140,11 @@ export function suggestImportCategories(plan, existingRows = []) {
     if (choices.length > 1) return { ...group, source: 'ambiguous', reason: 'Your previous category corrections disagree for this merchant. Choose the category for these transactions.' };
     if (choices.length === 1 && (choices[0].trusted || choices[0].ids.size >= 2) && purchases.length) {
       const category = choices[0].category;
-      if (norm(category) !== 'subscriptions' || rows.every(row => !installment(row))) return { ...group, category, source: 'user-history', confidence: 'high', reason: `You explicitly used “${category}” for this original merchant in ${choices[0].ids.size} saved transaction${choices[0].ids.size === 1 ? '' : 's'}.` };
+      if (norm(category) !== 'subscriptions' || rows.every(row => !installment(row))) return { ...group, category, source: 'user-history', confidence: 'high', reason: `You explicitly used “${category}” for this ${knownService(identity) ? 'service' : 'original merchant'} in ${choices[0].ids.size} saved transaction${choices[0].ids.size === 1 ? '' : 's'}.` };
     }
     if (!purchases.length) return { ...group, reason: 'Refunds and charges without a posted purchase do not establish a subscription. Choose a category if needed.' };
     if (choices.length) return { ...group, source: 'ambiguous', reason: 'There is only one usable previous category correction, or the transactions include instalments. Confirm a category for this group.' };
+    if (rows.some(installment)) return { ...group, source: 'ambiguous', reason: 'This group includes instalments. Choose a category; repeated instalments do not establish a subscription.' };
     if (knownService(identity) && rows.every(row => !installment(row))) return { ...group, category: 'Subscriptions', source: 'known-service', confidence: 'high', reason: 'The original merchant description names a subscription service. Review before applying; this does not prove a recurring contract.' };
     if (ambiguousSeller(identity)) return { ...group, source: 'ambiguous', reason: 'This merchant can sell one-off purchases or several different services. Its bank label or repeated charges do not identify a subscription.' };
     const historyRows = evidence.get(JSON.stringify([identity, group.currency])) || [];

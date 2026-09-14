@@ -39,6 +39,12 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
   const aborter = new AbortController();
   let workbooks = [], parsed = [], plan = [], selected = new Set(), edited = new Map(), aliases = {}, existing = [], busy = false, valid = false, page = 1;
   let categoryGroups = [], categoryDrafts = new Map(), categoryUndo = null;
+  let bulkCategory = '', categoryPage = 1, dialogObserver;
+  const addedCategories = new Set();
+  // Group choices remain editable in this preview; row-specific edits keep priority.
+  const categoryGroupEdits = new Set();
+  let categoryUndoGroups = new Set();
+  const groupReady = id => selected.has(id) && (!edited.get(id)?.bankReviewFields?.includes('personalCategory') || categoryGroupEdits.has(id));
   let aiBusy = false, previewRevision = 0, aiReviewed = new Set();
   const personalImport = currentScope().workspace === 'personal';
   const periodsEnabled = bankPeriodsEnabled && personalImport;
@@ -84,7 +90,18 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     field('Add your files', files), coverage,
     matchWork ? el('p', { class: 'help bank-work-match-help' }, 'Clear Work matches are handled automatically.') : null,
     summary, periodsEnabled ? periodHost : null, personalImport ? categoryPanel : null, detailsBatch, exceptions, review, options, el('div', { class: 'bank-import-save' }, saveButton, status));
-  const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
+  const unlockPage = () => { if (!document.querySelector('dialog.bank-import-dialog[open]')) document.documentElement.classList.remove('bank-import-open'); };
+  const dialog = openDialog('Import bank files', body, { wide: true, onClose: () => { aborter.abort(); dialogObserver?.disconnect(); unlockPage(); workbooks = []; parsed = []; plan = []; existing = []; edited.clear(); } });
+  // Header and Import live outside the single scrolling region, so neither can
+  // cover form fields. Lock the background without changing its scroll position.
+  if (dialog.open) {
+    dialog.classList.add('bank-import-dialog');
+    dialog.prepend(dialog.querySelector('.dlg-head'));
+    dialog.append(body.querySelector('.bank-import-save'));
+    document.documentElement.classList.add('bank-import-open');
+    dialogObserver = new MutationObserver(() => { if (!dialog.isConnected) { unlockPage(); dialogObserver.disconnect(); } });
+    dialogObserver.observe(document.body, { childList: true });
+  }
   const active = () => scopeIsCurrent() && dialog.open && dialog.isConnected && !aborter.signal.aborted;
   const invalidate = () => { previewRevision++; valid = false; selected.clear(); saveButton.disabled = true; status.textContent = 'Options changed. Apply options to continue.'; preview.replaceChildren(el('p', { class: 'help' }, 'Apply your import options to update this list.')); };
   const fail = error => { if (active()) { status.textContent = error.message || 'Could not read the files.'; status.classList.add('error'); } };
@@ -95,18 +112,20 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     periodError = '';
     try {
       if (!!nth.value !== (weekday.value !== '')) throw Error('Choose both parts of the weekday schedule, or leave both empty.');
-      periodDrafts = buildBankPeriodDrafts(parsed, workbooks, { rule: periodRule(), closingDates, cycleMonth: cycleMonths });
+      periodDrafts = buildBankPeriodDrafts(parsed, workbooks, { rule: periodRule(), closingDates, cycleMonth: cycleMonths, existingPeriods: periodSheet.bankPeriods || [] });
     } catch (error) { periodDrafts = []; periodError = error.message; }
     const registry = periodError ? [] : mergeBankPeriods(periodSheet.bankPeriods || [], periodDrafts, plan, { selectedIds: [...selected], expenses: existing });
     let missingDate = false;
     for (const node of periodFiles.querySelectorAll('[data-period-date-preview]')) {
       const drafts = periodDrafts.filter(item => item.fileIndex === Number(node.dataset.periodDatePreview));
       const resolved = drafts.map(draft => registry.find(period => period.sources?.some(source => source.id === draft.sourceId)) || draft);
-      missingDate ||= resolved.some(item => !item.end);
-      const dates = [...new Set(resolved.map(item => item.end ? `${item.start ? item.start + ' to ' : 'Closes '}${item.end}${item.dateBasis === 'schedule' ? ' · from your schedule' : ''}` : 'Closing date not set'))];
+      missingDate ||= resolved.some(item => item.status === 'closed' && !item.end);
+      const dates = [...new Set(resolved.map(item => item.end
+        ? `${item.dateBasis === 'estimated' || item.startDateBasis === 'estimated' ? 'Estimated period: ' : ''}${item.start ? item.start + ' to ' : 'Closes '}${item.end}${item.dateBasis === 'estimated' ? ' · latest bank activity' : item.dateBasis === 'schedule' ? ' · from your schedule' : ''}`
+        : item.status === 'open' && item.observedEnd ? `Transactions through ${item.observedEnd}` : 'No usable transaction dates'))];
       node.textContent = dates.join(' · ');
     }
-    periodStatus.textContent = periodError || (missingDate ? 'These files identify the statement status, but not its closing date. You can save them now and add dates later by reimporting.' : 'Dates follow the file or your saved choices. The payment due date is separate; spending totals are not the bank balance due.');
+    periodStatus.textContent = periodError || (missingDate ? 'A file has no usable dates. Its transactions can still be imported.' : 'Period dates are filled in automatically from bank activity or your saved choices. Matching TL, USD and EUR statements share a period. You can change the dates if needed.');
     updateSave();
   }
   function paintPeriods() {
@@ -121,10 +140,10 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       return el('div', { class: 'bank-period-file' }, el('strong', {}, file.metadata.fileName),
         el('span', {}, file.sourceType === 'garanti-statement' ? 'Closed · statement issued' : 'Ongoing · period still open'),
         el('small', { 'data-period-date-preview': String(index) }),
-        el('details', {}, el('summary', {}, 'Set period dates (optional)'), el('div', { class: 'grid2' }, field('Closing month · uses your weekday schedule', month), field('Exact closing date · overrides schedule', date))));
+        el('details', {}, el('summary', {}, 'Change dates'), el('div', { class: 'grid2' }, field('Closing month · if using a weekday schedule', month), field('Closing date override', date))));
     }));
     periodHost.replaceChildren(el('h3', {}, 'Card periods'), periodFiles,
-      el('details', {}, el('summary', {}, 'Usual closing schedule'), el('div', { class: 'grid2' }, field('Occurrence', nth), field('Weekday', weekday)), el('p', { class: 'help' }, 'Saved with your account. Choose a closing month for each file to use this schedule.')), periodStatus);
+      el('details', {}, el('summary', {}, 'Usual closing schedule (optional)'), el('div', { class: 'grid2' }, field('Occurrence', nth), field('Weekday', weekday)), el('p', { class: 'help' }, 'Saved with your account. Leave this empty to use the dates in your bank activity.')), periodStatus);
     refreshPeriods();
   }
   nth.addEventListener('change', refreshPeriods); weekday.addEventListener('change', refreshPeriods);
@@ -184,14 +203,14 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     }
     bulkPurpose.value = ''; paintRows();
   });
-  categoryView.addEventListener('change', paintCategories);
-  categorySearch.addEventListener('input', paintCategories);
+  categoryView.addEventListener('change', () => { categoryPage = 1; paintCategories(); });
+  categorySearch.addEventListener('input', () => { categoryPage = 1; paintCategories(); });
 
   // A category choice only edits this import preview. Import remains the single
   // record write and History Undo; bank descriptions and labels are preserved.
   function applyCategories(groups, useDrafts = true) {
     if (!personalImport || !valid || busy || aiBusy || !active()) return;
-    const before = new Map(); let count = 0;
+    const before = new Map(), beforeGroups = new Set(categoryGroupEdits); let count = 0;
     for (const group of groups) {
       const category = String(useDrafts ? categoryDrafts.get(group.id) ?? group.category : group.category).trim();
       if (!category) continue;
@@ -199,14 +218,15 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
         const item = plan.find(candidate => candidate.id === id);
         if (!selected.has(id) || !item || !['new', 'possible-match'].includes(item.status)) continue;
         const prior = edited.get(id);
-        if (prior?.bankReviewFields?.includes('personalCategory')) continue;
+        if (prior?.bankReviewFields?.includes('personalCategory') && !categoryGroupEdits.has(id)) continue;
         before.set(id, prior ? structuredClone(prior) : null);
         edited.set(id, { ...prior, personalCategory: category, categoryProvenance: 'user correction',
-          bankReviewFields: [...new Set([...(prior?.bankReviewFields || []), 'personalCategory'])] });
+            bankReviewFields: [...new Set([...(prior?.bankReviewFields || []), 'personalCategory'])] });
+        categoryGroupEdits.add(id);
         count++;
       }
     }
-    if (count) categoryUndo = before;
+    if (count) { categoryUndo = before; categoryUndoGroups = beforeGroups; }
     categoryFeedback.textContent = count ? `${count} transaction${count === 1 ? '' : 's'} updated in this preview. Import when ready.` : 'No selected transactions need this change.';
     paintCategories(); paintRows();
   }
@@ -219,6 +239,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
       current.bankReviewFields = (current.bankReviewFields || []).filter(field => field !== 'personalCategory');
       if (before?.bankReviewFields?.includes('personalCategory')) current.bankReviewFields.push('personalCategory');
       edited.set(id, current);
+      categoryUndoGroups.has(id) ? categoryGroupEdits.add(id) : categoryGroupEdits.delete(id);
     }
     categoryUndo = null; categoryFeedback.textContent = 'Last category change undone.'; paintCategories(); paintRows();
   }
@@ -230,26 +251,56 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
     categoryPanel.hidden = !categoryGroups.length;
     categoryTitle.textContent = suggestions.length ? `Categories · ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}` : 'Categories · group by merchant';
     const needle = categorySearch.value.trim().toLocaleLowerCase();
-    const groups = categoryGroups.filter(group => (categoryView.value === 'all' || group.category) && (!needle || group.merchant.toLocaleLowerCase().includes(needle)));
+    const groups = categoryGroups.filter(group => (categoryView.value === 'all' || group.category) && (!needle || group.merchant.toLocaleLowerCase().includes(needle) || plan.some(item => group.itemIds.includes(item.id) && [item.row?.merchant, item.row?.bankDescription].some(value => String(value || '').toLocaleLowerCase().includes(needle)))));
+    const countReady = groups => new Set(groups.flatMap(group => group.itemIds.filter(groupReady))).size;
+    const categories = [...new Set([
+      ...(currentSettings().personalCategories || []), ...(currentSettings().expenseCodes || []).map(item => item.short),
+      ...existing.map(row => row.personalCategory), ...categoryGroups.flatMap(group => [group.category, ...(group.currentCategories || [group.currentCategory])]),
+      ...categoryDrafts.values(), ...addedCategories, 'Subscriptions', 'Groceries', 'Food & drink', 'Transport', 'Shopping', 'Health', 'Travel', 'Other'
+    ].filter(value => typeof value === 'string' && value.trim() && value !== 'Mixed categories'))].sort((a, b) => a.localeCompare(b));
+    const categoryChoices = categories.map(value => [value, value]);
+    const bulk = pick([['', 'Choose a category'], ...categoryChoices], bulkCategory, 'Category for matching merchants');
+    const bulkApply = el('button', { type: 'button', disabled: !bulkCategory || !countReady(groups), onclick: () => {
+      for (const group of groups) categoryDrafts.set(group.id, bulkCategory);
+      applyCategories(groups);
+    } }, `Apply to ${countReady(groups)} transactions`);
+    bulk.addEventListener('change', () => { bulkCategory = bulk.value; bulkApply.disabled = !bulkCategory || !countReady(groups); });
+    const addCategory = () => {
+      const name = el('input', { maxlength: 80, 'aria-label': 'New category name' });
+      const message = el('p', { class: 'help', role: 'status' });
+      const add = el('button', { type: 'button', class: 'primary', onclick: () => {
+        const value = name.value.trim(); if (!value) { message.textContent = 'Enter a category name.'; return; }
+        addedCategories.add(value); bulkCategory = value; extra.close(); paintCategories();
+      } }, 'Add category');
+      const extra = openDialog('New category', el('div', { class: 'form' }, field('Category name', name), add, message));
+      name.focus();
+    };
+    const pages = Math.max(1, Math.ceil(groups.length / 15)); categoryPage = Math.min(categoryPage, pages);
     const list = el('div', { class: 'bank-category-groups' });
-    for (const [index, group] of groups.entries()) {
-      const ids = group.itemIds.filter(id => selected.has(id) && !edited.get(id)?.bankReviewFields?.includes('personalCategory'));
-      const input = el('input', { value: categoryDrafts.get(group.id) ?? group.category, maxlength: 80, placeholder: 'Choose a category', 'aria-label': `Group category ${index + 1}` });
-      input.addEventListener('input', () => { categoryDrafts.set(group.id, input.value); });
+    for (const [offset, group] of groups.slice((categoryPage - 1) * 15, categoryPage * 15).entries()) {
+      const index = (categoryPage - 1) * 15 + offset;
+      const ids = group.itemIds.filter(groupReady);
+      const input = pick([['', 'Keep current category'], ...categoryChoices], categoryDrafts.get(group.id) ?? group.category, `Group category ${index + 1}`);
+      input.addEventListener('change', () => { categoryDrafts.set(group.id, input.value); });
       list.append(el('div', { class: 'bank-category-group' },
-        el('div', {}, el('strong', {}, group.merchant), el('small', {}, `${group.currency} · ${group.itemIds.length} transaction${group.itemIds.length === 1 ? '' : 's'} · Bank/import label: ${group.currentCategory}`), el('p', { class: 'help' }, group.reason)),
+        el('div', {}, el('strong', {}, group.merchant), el('small', {}, `${group.currency} · ${group.itemIds.length} transaction${group.itemIds.length === 1 ? '' : 's'} · Current: ${group.currentCategory}`), el('details', {}, el('summary', {}, 'Why this suggestion?'), el('p', { class: 'help' }, group.reason))),
         field('Your category', input), el('button', { type: 'button', disabled: !ids.length, onclick: () => applyCategories([group]) }, ids.length ? `Use for ${ids.length}` : 'Applied / not selected')));
     }
     if (!groups.length) list.append(el('p', { class: 'help' }, 'No suggestions here. Choose All merchant groups to set a category for several transactions together.'));
     const aiGroups = pendingAiGroups();
-    categoryBody.replaceChildren(el('p', { class: 'help' }, 'Local suggestions use merchant descriptions and your previous corrections. Bank labels stay in the original record. Choose the categories you want before importing.'),
-      el('div', { class: 'bank-category-ai' },
-        el('button', { type: 'button', disabled: aiBusy || busy || !aiGroups.length, onclick: askAi }, aiBusy ? 'Getting AI suggestions…' : 'Suggest with AI'),
-        el('small', {}, `Sends up to ${Math.min(aiGroups.length, 200)} selected merchant groups, sample amounts, currencies and bank labels to OpenAI. Suggestions need your approval. No files or card details are uploaded.`)),
-      el('div', { class: 'bank-category-controls' }, categoryView, categorySearch,
-        el('button', { type: 'button', disabled: !suggestions.length, onclick: () => applyCategories(suggestions) }, 'Use suggested categories'),
+    categoryBody.replaceChildren(el('p', { class: 'help' }, 'Use the suggestions in one click, or choose one category for matching merchants. No need to edit each transaction. You can also import now and categorize later.'),
+      el('div', { class: 'bank-category-controls' },
+        el('button', { type: 'button', class: 'primary', disabled: !countReady(suggestions), onclick: () => applyCategories(suggestions) }, 'Use suggested categories'),
         el('button', { type: 'button', disabled: !categoryUndo, onclick: undoCategories }, 'Undo category change')),
-      list, categoryFeedback);
+      el('details', { class: 'bank-category-ai-options' }, el('summary', {}, 'AI suggestions (optional)'), el('div', { class: 'bank-category-ai' },
+        el('button', { type: 'button', disabled: aiBusy || busy || !aiGroups.length, onclick: askAi }, aiBusy ? 'Getting AI suggestions…' : 'Suggest with AI'),
+        el('small', {}, `Sends up to ${Math.min(aiGroups.length, 200)} selected merchant groups, sample amounts, currencies and bank labels to OpenAI. Review suggestions before applying. Requires the website's API connection.`))),
+      el('div', { class: 'bank-category-controls' }, categoryView, categorySearch),
+      el('div', { class: 'bank-category-bulk' }, field('Set a category for all matching merchants', bulk), bulkApply, el('button', { type: 'button', class: 'link', onclick: addCategory }, 'New category…')),
+      list, pages > 1 ? el('div', { class: 'personal-pagination' },
+        el('button', { type: 'button', disabled: categoryPage <= 1, onclick: () => { categoryPage--; paintCategories(); } }, 'Previous merchants'),
+        `Page ${categoryPage} of ${pages} · ${groups.length} merchant groups`,
+        el('button', { type: 'button', disabled: categoryPage >= pages, onclick: () => { categoryPage++; paintCategories(); } }, 'Next merchants')) : '', categoryFeedback);
     if (focusedSearch) { categorySearch.focus({ preventScroll: true }); categorySearch.setSelectionRange(...selection); }
   }
 
@@ -340,7 +391,7 @@ export async function openBankImport({ settings, sheet, onChange = () => {}, syn
         const purpose = pick(purposes, purposeOf(row), `Purpose for transaction ${position}`);
         const change = field => {
           // Undo a group action must not erase a newer row-by-row correction.
-          if (field === 'personalCategory') categoryUndo?.delete(item.id);
+          if (field === 'personalCategory') { categoryUndo?.delete(item.id); categoryGroupEdits.delete(item.id); }
           edited.set(item.id, { ...edited.get(item.id), [field]: field === 'personalCategory' ? category.value.trim() || 'Uncategorized' : purpose.value,
             ...(personalImport && field === 'personalCategory' ? { categoryProvenance: 'user correction' } : {}), bankReviewFields: [...new Set([...(edited.get(item.id)?.bankReviewFields || []), field])] });
           if (field === 'personalCategory') paintCategories();

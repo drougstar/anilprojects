@@ -1,6 +1,6 @@
 .bank-import { display: grid; gap: 14px; }
 .bank-source-list { display: grid; gap: 7px; }
-.bank-source-list > div { display: grid; gap: 2px; overflow-wrap: anywhere; }
+.bank-source-list > div,.bank-source-list details > div { display: grid; gap: 2px; overflow-wrap: anywhere; }
 .bank-source-list small,.bank-provenance { color: var(--ink-3); }
 .bank-card-mapping { margin-bottom: 12px; }
 .bank-card-mapping summary { cursor: pointer; padding: 8px 0; font-weight: 600; }
@@ -26,7 +26,7 @@
 .bank-review-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-left: 34px; }
 .bank-review-needed { color: var(--warn, #946000); }
 .bank-provenance { overflow-wrap: anywhere; font-size: 11px; }
-.bank-import-save { position: sticky; bottom: -1px; z-index: 2; background: var(--surface); padding: 12px 0 4px; border-top: 1px solid var(--rule); }
+.bank-import-save { background: var(--surface); padding: 12px 0 4px; border-top: 1px solid var(--rule); }
 .bank-import-save .help { margin: 8px 0 0; }
 .bank-import-save .help:empty { display: none; }
 .bank-original { display: grid; gap: 6px; overflow-wrap: anywhere; }
@@ -37,7 +37,7 @@
 .bank-category-body{display:grid;gap:12px;margin-top:12px}
 .bank-category-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .bank-category-controls input,.bank-category-controls select{width:auto;min-width:140px;max-width:100%}
-.bank-category-groups{max-height:420px;overflow:auto}
+.bank-category-groups{max-height:none;overflow:visible}
 .bank-category-group{display:grid;grid-template-columns:minmax(0,1fr) minmax(120px,180px) auto;gap:10px;align-items:center;padding:12px 0;border-top:1px solid var(--rule)}
 .bank-category-group small{display:block;color:var(--ink-3)}
 .bank-category-group>div{overflow-wrap:anywhere}.bank-category-group .field,.bank-category-group input{min-width:0;max-width:100%}
@@ -72,6 +72,11 @@
 @media(max-width:600px) { .work-review-tabs button { flex:1 1 130px; } .work-review-controls { align-items:stretch; } }
 .bank-category-ai { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; }
 .bank-category-ai small { flex:1 1 260px; }
+.bank-category-ai-options > summary { font-weight: 600; }
+.bank-category-ai-options[open] .bank-category-ai { margin-top: 10px; margin-bottom: 0; }
+.bank-category-bulk { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 12px; border-radius: 8px; background: var(--surface-2); }
+.bank-category-bulk .field { flex: 1 1 240px; min-width: 0; }
+.bank-category-bulk select { min-width: 0; max-width: 100%; }
 .bank-period-panel { border: 1px solid var(--line, #d9dee7); border-radius: 8px; padding: 12px; margin: 12px 0; }
 .bank-period-panel h3 { margin: 0 0 8px; font-size: 1rem; }
 .bank-period-files { display: grid; gap: 8px; }
@@ -79,3 +84,56 @@
 .bank-period-file > span, .bank-period-file summary { font-size: .85rem; }
 .bank-period-panel > details { margin-top: 10px; }
 .bank-period-panel input, .bank-period-panel select { min-width: 0; max-width: 100%; }
+
+/* Only this import dialog locks the page. Its header and footer occupy their
+   own rows, so the content has one scrollbar and can never sit under Import. */
+html.bank-import-open { overflow: hidden; scrollbar-gutter: stable; }
+html.bank-import-open body { overflow: hidden; }
+dialog.dlg.bank-import-dialog[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: min(880px, calc(100vh - 32px));
+  height: min(880px, calc(100dvh - 32px));
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  min-height: 0;
+  overflow: hidden;
+}
+.bank-import-dialog > .dlg-head {
+  min-width: 0;
+  margin: 0;
+  padding: 12px 18px;
+  gap: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.bank-import-dialog > .dlg-head h3 { overflow-wrap: anywhere; }
+.bank-import-dialog > .dlg-head .dialog-close { flex: 0 0 auto; }
+.bank-import-dialog > .dlg-body {
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  padding: 16px 18px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scroll-padding-block: 16px;
+}
+.bank-import-dialog .bank-import > * { min-width: 0; }
+.bank-import-dialog > .bank-import-save {
+  position: static;
+  min-width: 0;
+  padding: 12px 18px max(12px, env(safe-area-inset-bottom));
+}
+.bank-import-dialog > .bank-import-save .help { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  html.bank-import-open { scrollbar-gutter: auto; }
+  dialog.dlg.bank-import-dialog[open] {
+    height: calc(100vh - 12px);
+    height: calc(100dvh - 12px);
+    max-height: calc(100vh - 12px);
+    max-height: calc(100dvh - 12px);
+  }
+  .bank-import-dialog > .dlg-head { padding: 10px 14px; }
+  .bank-import-dialog > .dlg-body { padding: 14px; }
+  .bank-import-dialog > .bank-import-save { padding: 10px 14px max(10px, env(safe-area-inset-bottom)); }
+}
