@@ -305,7 +305,7 @@ export async function renderPersonal(root, nextView = 'overview') {
         workCoverage = { source: 'unavailable', notice: 'Work records could not be combined. Your Personal records are shown; the combined total is incomplete. Use Refresh all spending to try again.' };
       }
       records = ledger.rows;
-      bankPeriods = groupBankPeriods(loaded[5].flatMap(sheet => (sheet.bankPeriods || []).map(period => bankPeriodView(period, loaded[0]))));
+      bankPeriods = groupBankPeriods(loaded[5].flatMap(sheet => (sheet.bankPeriods || []).map(period => bankPeriodView(period, loaded[0]))), { expenses: loaded[0], today: today() });
       // Older saved views selected a single card. Keep the same cycle while
       // the period selector now includes every card and currency together.
       if (state.filters.bankPeriod) state.filters.bankPeriod = resolveBankPeriodSelection(state.filters.bankPeriod, bankPeriods) || state.filters.bankPeriod;
@@ -473,7 +473,7 @@ function periodControls(month) {
     if (!period) options.unshift([state.filters.bankPeriod, 'No saved period selected']);
     return el('div', { class: 'personal-period personal-bank-period' }, mode, choice('Bank period', options, state.filters.bankPeriod, chooseBankPeriod),
       el('div', { class: 'personal-bank-period-info', role: 'status' }, period
-        ? `${period.status === 'closed' ? 'Closed statement' : 'Ongoing period'} · ${period.cards.length} cards · ${period.importedSpendingCount} purchases and refunds. Use currency and card filters to narrow it.${period.dateBasis === 'estimated' ? ' Dates estimated from bank activity.' : ''}${period.coverageComplete ? '' : ' Some statement rows are unavailable.'}`
+        ? `${period.status === 'closed' ? 'Closed statement' : 'Ongoing period'} · ${period.cards.length} cards · ${period.importedSpendingCount} purchases and refunds. Use currency and card filters to narrow it.${period.membershipBasis === 'estimated-cycle' ? ' Automatically follows the last closed statement. The next statement will confirm the dates.' : period.dateBasis === 'estimated' ? ' Dates estimated from bank activity.' : ''}${period.coverageComplete ? '' : ' Some imported rows are unavailable.'}`
         : 'Import your bank files to save their periods. If this period was removed, choose another period or Month.'));
   }
   if (!custom) return el('div', { class: 'personal-period' }, mode,

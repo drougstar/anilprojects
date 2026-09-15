@@ -149,7 +149,9 @@ export function analyzePersonalStudy(rows, { month, dateFrom = '', dateTo = '', 
     recurring: recurringCandidates(recurringHistory, entries, currency), budgets: budgetData.results, budgetIssues: budgetData.issues, budgetNotice,
     excluded, movements, coverage: { firstRecordedDate: dates[0] || null, lastRecordedDate: dates.at(-1) || null,
       recordedDays: new Set(dates).size, calendarDays: bounds.days, completeMonthKnown: false,
-      basis: bankPeriod ? 'statement-membership' : 'transaction-date', explanation: bankPeriod
+      basis: bankPeriod?.membershipBasis === 'estimated-cycle' ? 'estimated-cycle' : bankPeriod ? 'statement-membership' : 'transaction-date', explanation: bankPeriod?.membershipBasis === 'estimated-cycle'
+        ? 'This ongoing period includes bank spending after the last closed statement and remaining purchases from ongoing downloads. Its monthly assignment is estimated until the next statement confirms the dates. Payments and pending authorizations remain outside spending.'
+        : bankPeriod
         ? 'This view includes transactions linked to the selected bank export, even when their purchase dates fall outside its cycle. Dates shown are purchase dates. Totals describe imported spending, not the statement balance due.'
         : bounds.isRange
         ? 'The range includes both selected dates and uses transaction dates, not statement closing dates. Recorded dates do not prove that every purchase is present.'
