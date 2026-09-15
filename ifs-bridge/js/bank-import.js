@@ -58,6 +58,22 @@ export function parseBankDate(value, { dateOrder = 'dmy' } = {}) {
 function aliasName(value) {
   return norm(value).replace(/\.(?:xlsx?|csv)$/i, '').replace(/^(?:donemici islemler|ekstre islemleri)\s*[-–:]?\s*/i, '').replace(/\b(?:tl|try|usd|eur|cad|gbp)\b/g, '').replace(/\s+/g, ' ').trim();
 }
+function filenameCard(value) {
+  const name = norm(value);
+  if (!/^(?:donemici islemler|donem ici islemler|ekstre islemleri)\b/.test(name) || !/\.(?:xlsx?|csv)$/.test(name)) return null;
+  // A browser download counter belongs to the filename, not the card. Remove it
+  // before the currency so a deliberate card label such as "MC (2) TL" survives.
+  const withoutCounter = name.replace(/\.(?:xlsx?|csv)$/, '').replace(/\b(tl|try|usd|eur|cad|gbp)\s*(?:\(\d+\))+$/, '$1');
+  const alias = withoutCounter.replace(/^(?:donemici islemler|donem ici islemler|ekstre islemleri)\s*[-–:]?\s*/, '')
+    .replace(/\b(?:tl|try|usd|eur|cad|gbp)\b/g, '').replace(/^[\s\-–:]+|[\s\-–:]+$/g, '').replace(/\s+/g, ' ').trim();
+  return { alias: norm(alias), legacy: norm(aliasName(value)) };
+}
+function filenameAccount(value, aliases) {
+  const fromFile = filenameCard(value);
+  if (!fromFile) return aliasName(value);
+  // A remembered mapping for the original spelling is an explicit choice.
+  return aliases.has(fromFile.legacy) ? fromFile.legacy : fromFile.alias;
+}
 function suffixOf(value) {
   const raw = text(value), masked = /(?:\d{3,6})\s*(?:[*•.…]+\s*)+(\d{3,4})\b/.exec(raw);
   if (masked) return masked[1];
@@ -100,7 +116,22 @@ function workbookAliases(sheets) {
   }
   return found;
 }
-function canonicalAccount(row, aliases) { return account(row.maskedCard || row.accountId || row.card, aliases).accountId; }
+function canonicalAccount(row, aliases) {
+  const value = row.maskedCard || row.accountId || row.card, fromFile = filenameCard(row.sourceFile);
+  const alias = aliasName(value).replace(/^alias:/, '');
+  // Repair legacy filename-derived identities only when the retained source
+  // proves their origin. Never rewrite an unrelated custom label or masked card.
+  if (row.bankAccountSource !== 'label' && !row.maskedCard && !suffixOf(value) && fromFile && [fromFile.legacy, fromFile.alias].includes(alias))
+    return account(filenameAccount(row.sourceFile, aliases), aliases).accountId;
+  return account(value, aliases).accountId;
+}
+// Share the same evidence-based identity with period views; callers retain the
+// saved record and ID. In particular, a bare custom alias is not filename proof.
+export function bankAccountId(row, { cardAliases = {} } = {}) {
+  if (row.accountId && row.accountId !== 'unknown' && !/^(?:alias|mask|card|last):/.test(row.accountId)) return row.accountId;
+  try { return canonicalAccount(row, aliasesFrom(cardAliases)); }
+  catch { return row.accountId || 'unknown'; } // A broken saved mapping cannot hide the Spending page.
+}
 const importedBankRow = row => !!(row?.bankTransaction || row?.sourceType || row?.bankImport || row?.transactionKey || row?.bankFingerprint);
 
 // Mappings travel with imported records, so later uploads on another device can
@@ -114,7 +145,14 @@ export function deriveBankCardAliases(existingRows = []) {
   };
   for (const row of existingRows) {
     if (!importedBankRow(row)) continue;
-    for (const [from, to] of Object.entries(row.bankCardAliases || {})) remember(from, to);
+    const fromFile = row.bankAccountSource !== 'label' && filenameCard(row.sourceFile);
+    for (const [from, to] of Object.entries(row.bankCardAliases || {})) {
+      remember(from, to);
+      // A previous download may have been labelled before filename cleanup.
+      // Carry that choice to its proven filename identity on the next device.
+      // Conflicting remembered choices still surface through the sets below.
+      if (fromFile?.alias && aliasName(from).replace(/^alias:/, '') === fromFile.legacy) remember(fromFile.alias, to);
+    }
     if (row.maskedCard && String(row.accountId || '').startsWith('alias:')) remember(row.maskedCard, row.accountId.slice(6));
   }
   const cardAliases = {}, conflicts = [];
@@ -178,7 +216,7 @@ function installmentOf(description) {
   return current > 0 && total >= current ? { current, total, basis: 'posted-installment' } : null;
 }
 function normalizedRow(raw, context) {
-  const base = { sourceFile: context.fileName, sourceSheet: context.sheetName, sourceRow: context.rowNumber, sourceType: context.sourceType, ...account(raw.card, context.aliases) };
+  const base = { sourceFile: context.fileName, sourceSheet: context.sheetName, sourceRow: context.rowNumber, sourceType: context.sourceType, ...(context.cardSource ? { bankAccountSource: context.cardSource } : {}), ...account(raw.card, context.aliases) };
   try {
     const date = parseBankDate(raw.date), currency = currencyOf(raw.currency);
     if (!currency) throw Error('Missing or unsupported currency.');
@@ -203,13 +241,14 @@ function parseGaranti(sheets, context, options) {
   const result = []; let recognized = false;
   const fileSourceType = /^ekstre\b|\bekstre islemleri\b/.test(fold(context.fileName)) ? 'garanti-statement' : 'garanti-in-month';
   for (const sheet of sheets) {
-    let columns = null, pending = false, card = options.account || options.card || aliasName(context.fileName), currency = currencyOf(context.fileName), sourceType = fileSourceType;
+    let columns = null, pending = false, card = options.account || options.card || filenameAccount(context.fileName, context.aliases), currency = currencyOf(context.fileName), sourceType = fileSourceType;
+    let cardSource = options.account || options.card ? 'label' : 'filename';
     for (let index = 0; index < sheet.rows.length; index++) {
       const cells = sheet.rows[index], populated = cells.filter(present), heading = populated.length === 1 ? fold(populated[0]) : '';
       // Bank section headings occupy a single cell. Transaction descriptions can
       // contain the same words, so never use a transaction to reset the table.
       const cardHeading = /numarali kart/.test(heading);
-      if (cardHeading) { const suffix = suffixOf(populated[0]); card = suffix ? `mask:${suffix}` : ''; currency = currencyOf(populated[0]); pending = false; columns = null; }
+      if (cardHeading) { const suffix = suffixOf(populated[0]); card = suffix ? `mask:${suffix}` : ''; cardSource = 'mask'; currency = currencyOf(populated[0]); pending = false; columns = null; }
       if (/^ekstre islemleri\b/.test(heading) || (cardHeading && /\bekstre bilgileri\b/.test(heading))) { sourceType = 'garanti-statement'; pending = false; columns = null; }
       if (/^acik provizyon\b/.test(heading)) { sourceType = 'garanti-in-month'; pending = true; columns = null; }
       if (/^donemici islemler\b/.test(heading)) { sourceType = 'garanti-in-month'; pending = false; columns = null; }
@@ -219,7 +258,7 @@ function parseGaranti(sheets, context, options) {
         currency = currencyOf(cells[amountIndex]) || currency; recognized = true; continue;
       }
       if (!columns || !isDatedCandidate(cells[columns.date])) continue;
-      result.push(normalizedRow({ date: cells[columns.date], description: cells[columns.description], bankCategory: cells[columns.category], amount: cells[columns.amount], currency, card, pending }, { ...context, sourceType, sheetName: sheet.name, rowNumber: index + 1, decimal: 'comma', bankSigns: true }));
+      result.push(normalizedRow({ date: cells[columns.date], description: cells[columns.description], bankCategory: cells[columns.category], amount: cells[columns.amount], currency, card, pending }, { ...context, sourceType, cardSource, sheetName: sheet.name, rowNumber: index + 1, decimal: 'comma', bankSigns: true }));
     }
   }
   return { rows: result, recognized };

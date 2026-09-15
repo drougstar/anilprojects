@@ -1,7 +1,7 @@
 // Pure statement-cycle metadata. Source files establish membership. Their last
 // posted activity can estimate a close, but never a payment deadline or balance.
 import { stableId, validDate } from './expense-workflows.js';
-import { parseBankDate } from './bank-import.js';
+import { parseBankDate, bankAccountId, deriveBankCardAliases } from './bank-import.js';
 
 const DAY = 86400000;
 const clean = value => String(value ?? '').trim();
@@ -16,6 +16,18 @@ function checkedDate(date) {
   return date;
 }
 function checkedMonth(month) { checkedDate(`${month}-01`); return month; }
+// A period keeps its original ID/account fields. Its retained source filenames
+// or member rows can establish the corrected identity for matching and display.
+export function bankPeriodAccountId(period, { expenses = [], cardAliases = {} } = {}) {
+  const options = { cardAliases }, evidence = [];
+  const members = new Set(period.memberIds || []);
+  const memberRows = expenses.filter(row => members.has(row.id) && row.accountId === period.accountId);
+  for (const row of memberRows) evidence.push(bankAccountId(row, options));
+  for (const source of period.sources || []) if (source.sourceFile && (memberRows.length || source.bankAccountSource))
+    evidence.push(bankAccountId({ ...period, sourceFile: source.sourceFile, bankAccountSource: source.bankAccountSource || period.bankAccountSource }, options));
+  if (period.sourceFile && (memberRows.length || period.bankAccountSource)) evidence.push(bankAccountId(period, options));
+  return evidence.length && new Set(evidence).size === 1 ? evidence[0] : bankAccountId({ accountId: period.accountId, card: period.card }, options);
+}
 function adjacentMonth(month, offset) {
   checkedMonth(month);
   const [year, number] = month.split('-').map(Number);
@@ -125,8 +137,10 @@ export function buildBankPeriodDrafts(files, workbooks = [], { rule, closingDate
     const sourceHash = clean(file.metadata?.fileHash || workbooks[fileIndex]?.fileHash) || identity('bank-period-file', sourceFile, file.rows || []);
     for (const rows of groups.values()) {
       const { accountId = 'unknown', card = 'Unspecified card', currency = '' } = rows[0];
+      const origins = unique(rows.map(row => row.bankAccountSource).filter(Boolean));
       const sourceId = identity('bank-period-source', sourceHash, accountId, currency, status);
       drafts.push({ id: identity('bank-period', accountId, currency, end || sourceId), sourceId, fileIndex, accountId, card, currency, status,
+        ...(origins.length === 1 ? { bankAccountSource: origins[0] } : {}),
         start, end, dateBasis, startDateBasis, estimateReason, estimateMethod, startEstimateMethod, observedStart, observedEnd, sourceFile, sourceHash, expectedCount: rows.length,
         expectedSpendingCount: rows.filter(row => row.include && !row.error).length, errorCount: rows.filter(row => row.error).length,
         sourceRows: rows.map(row => ({ sheet: row.sourceSheet, row: row.sourceRow })), ...(headers.dueDate ? { dueDate: headers.dueDate } : {}) });
@@ -163,6 +177,8 @@ function refreshSummary(period) {
 
 export function mergeBankPeriods(existing = [], drafts = [], plan = [], { selectedIds = [], expenses = [], at } = {}) {
   const selected = new Set(selectedIds), expensesById = new Map(expenses.map(row => [row.id, row]));
+  const cardAliases = deriveBankCardAliases(expenses).cardAliases;
+  const accountFor = period => bankPeriodAccountId(period, { expenses, cardAliases });
   const accepted = new Set(plan.filter(item => selected.has(item.id) && ['new', 'possible-match', 'enrichment'].includes(item.status) &&
     !item.row?.deleted && (!expensesById.get(item.id)?.deleted || item.personalResetReimport === true)).map(item => item.id));
   const previous = new Map(existing.map(period => [period.id, period])), registry = new Map(existing.map(period => [period.id, copy(period)]));
@@ -170,19 +186,34 @@ export function mergeBankPeriods(existing = [], drafts = [], plan = [], { select
   const estimatePriority = method => method === 'matched-try' ? 2 : method === 'latest-activity' ? 1 : 0;
   const startPriority = method => method === 'previous-close' ? 2 : method === 'observed-first' ? 1 : 0;
   for (const incoming of drafts) {
-    const sameSource = [...registry.values()].find(period => (period.sources || []).some(source => source.id === incoming.sourceId));
-    const known = sameSource?.end && (!incoming.end || datePriority(sameSource.dateBasis) > datePriority(incoming.dateBasis) ||
-      (sameSource.dateBasis === 'estimated' && incoming.dateBasis === 'estimated' && estimatePriority(sameSource.estimateMethod) > estimatePriority(incoming.estimateMethod))) ? sameSource : null;
+    const incomingAccount = accountFor(incoming);
+    const matchingSource = (period, source) => source.id === incoming.sourceId ||
+      (incoming.sourceHash && source.sourceHash === incoming.sourceHash && source.status === incoming.status &&
+        period.currency === incoming.currency && accountFor(period) === incomingAccount);
+    const sameSource = [...registry.values()].find(period => (period.sources || []).some(source => matchingSource(period, source)));
+    const equivalentCycle = incoming.end && [...registry.values()].find(period => period.end === incoming.end && period.currency === incoming.currency && accountFor(period) === incomingAccount);
+    const datesSource = sameSource || equivalentCycle;
+    const known = datesSource?.end && (!incoming.end || datePriority(datesSource.dateBasis) > datePriority(incoming.dateBasis) ||
+      (datesSource.dateBasis === 'estimated' && incoming.dateBasis === 'estimated' && estimatePriority(datesSource.estimateMethod) > estimatePriority(incoming.estimateMethod))) ? datesSource : null;
     const draft = known ? { ...incoming, id: known.id, start: known.start, end: known.end, dateBasis: known.dateBasis,
       startDateBasis: known.startDateBasis || 'unknown', estimateReason: known.estimateReason || '', estimateMethod: known.estimateMethod || '',
       startEstimateMethod: known.startEstimateMethod || '', ...(known.dueDate ? { dueDate: known.dueDate } : {}) } : { ...incoming };
+    draft.accountId = incomingAccount;
+    const oldSource = sameSource?.sources.find(source => matchingSource(sameSource, source));
+    if (oldSource) draft.sourceId = oldSource.id;
+    const sameCycle = draft.end && [...registry.values()].find(period => period.end === draft.end && period.currency === draft.currency && accountFor(period) === incomingAccount);
+    if (sameCycle) draft.id = sameCycle.id;
     // Reimporting only one file is less context, not a reason to discard a
     // previously matched close or the start established by the prior statement.
-    if (sameSource?.end === draft.end && draft.dateBasis === 'estimated' && sameSource.start && startPriority(sameSource.startEstimateMethod) > startPriority(draft.startEstimateMethod)) {
-      draft.start = sameSource.start; draft.startDateBasis = sameSource.startDateBasis; draft.startEstimateMethod = sameSource.startEstimateMethod;
+    const startSource = sameSource?.end === draft.end ? sameSource : equivalentCycle;
+    const strongerStart = startSource && (datePriority(startSource.startDateBasis) > datePriority(draft.startDateBasis) ||
+      (datePriority(startSource.startDateBasis) === datePriority(draft.startDateBasis) && startPriority(startSource.startEstimateMethod) > startPriority(draft.startEstimateMethod)));
+    if (startSource?.start && startSource.start <= draft.end && strongerStart) {
+      draft.start = startSource.start; draft.startDateBasis = startSource.startDateBasis; draft.startEstimateMethod = startSource.startEstimateMethod || '';
     }
     const membership = resolvedSources(draft, plan, selected, expensesById, accepted);
     const source = { id: draft.sourceId, sourceFile: draft.sourceFile, sourceHash: draft.sourceHash, status: draft.status,
+      ...(draft.bankAccountSource ? { bankAccountSource: draft.bankAccountSource } : {}),
       expectedCount: draft.expectedCount, expectedSpendingCount: draft.expectedSpendingCount, errorCount: draft.errorCount || 0, ...membership };
     // Choosing or correcting a file's closing date moves that source snapshot,
     // not its transactions. One file cannot establish two different cycles.

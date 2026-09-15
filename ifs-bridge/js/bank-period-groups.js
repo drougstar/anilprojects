@@ -1,6 +1,8 @@
 // Presentation-only groups. The detailed statement registry and its financial
 // records remain unchanged; membership, not the displayed date span, sets totals.
 import { validDate, isSpendingRecord } from './expense-workflows.js';
+import { bankAccountId, deriveBankCardAliases } from './bank-import.js';
+import { bankPeriodAccountId } from './bank-periods.js';
 
 const text = value => String(value ?? '').trim();
 const unique = values => [...new Set(values.map(text).filter(Boolean))].sort();
@@ -119,9 +121,13 @@ const matchesAccount = (group, account, card) => account && account !== 'unknown
 /** Add the ongoing cycle from already-saved bank rows. Derived views never write
  * back to statements or transactions. Imported closed membership always wins. */
 export function groupBankPeriods(periodViews = [], { expenses, today = '' } = {}) {
-  const groups = savedBankPeriodGroups(periodViews);
+  if (!Array.isArray(periodViews)) throw Error('Expected saved bank period views.');
+  const cardAliases = deriveBankCardAliases(Array.isArray(expenses) ? expenses : []).cardAliases;
+  const groups = savedBankPeriodGroups(periodViews.map(period => period ? ({ ...period,
+    accountId: bankPeriodAccountId(period, { expenses: Array.isArray(expenses) ? expenses : [], cardAliases }) }) : period));
   if (!Array.isArray(expenses)) return groups;
-  const rows = new Map(expenses.filter(row => row && !row.deleted && row.sourceWorkspace !== 'work' && row.workspace_id !== 'work' && text(row.id)).map(row => [text(row.id), row]));
+  const rows = new Map(expenses.filter(row => row && !row.deleted && row.sourceWorkspace !== 'work' && row.workspace_id !== 'work' && text(row.id))
+    .map(row => [text(row.id), { ...row, accountId: bankAccountId(row, { cardAliases }) }]));
   const closed = groups.filter(group => group.status === 'closed' && date(group.end));
   const closedIds = new Set(groups.filter(group => group.status === 'closed').flatMap(group => group.memberIds));
   const claimed = new Set(closedIds), derived = new Map(), kept = groups.filter(group => group.status === 'closed');
